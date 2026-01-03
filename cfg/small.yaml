@@ -1,0 +1,72 @@
+# SLiM-CZ-V1 Small Configuration
+# Slavic Linguistic integrated Micro-model for Czechia
+# ~14M parameters, ~56 MB (DEFAULT)
+
+# Model Architecture
+model:
+  vocab_size: 10000
+  d_model: 256
+  num_heads: 8
+  num_layers: 6
+  d_ff: 1024
+  max_seq_len: 512
+  dropout: 0.1
+
+# Training Parameters
+train:
+  batch_size: 32
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  warmup_steps: 1000
+  max_steps: 100000
+  gradient_clip: 1.0
+  epochs: 10
+  
+  # Scheduler
+  scheduler: "cosine"
+  min_lr: 1.0e-6
+  
+  # Logging & Checkpointing
+  log_every: 100
+  eval_every: 1000
+  save_every: 5000
+  
+  # Early Stopping
+  patience: 5
+  min_delta: 0.001
+
+# Generation Parameters
+generation:
+  max_new_tokens: 100
+  temperature: 0.8
+  top_k: 50
+  top_p: 0.95
+  repetition_penalty: 1.2
+  do_sample: true
+
+# Data Configuration
+data:
+  train_split: 0.90
+  val_split: 0.05
+  test_split: 0.05
+  seq_len: 512
+  stride: 256
+  
+  # Text Processing
+  lowercase: false
+  remove_urls: true
+  remove_emails: true
+  min_line_length: 10
+  min_frequency: 2
+
+# Model Info
+info:
+  name: "SLiM-CZ-V1-Small"
+  description: "Slavic Linguistic integrated Micro-model for Czechia - Small variant"
+  version: "1.0"
+  language: "cs"
+  estimated_params: "~14M"
+  estimated_size: "~56 MB"
+  use_case: "Development and experiments (recommended for starting)"
