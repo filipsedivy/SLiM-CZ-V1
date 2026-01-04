@@ -2,7 +2,9 @@
 
 **Slavic Linguistic integrated Micro-model for Czechia**
 
+[![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-sm.svg)](https://huggingface.co/filipsedivy/SLiM-CZ-V1)
 [![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-sm.svg)](https://huggingface.co/datasets/filipsedivy/SLiM-CZ-V1)
+[![Follow us on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/follow-us-on-hf-sm.svg)](https://huggingface.co/filipsedivy)
 
 A small Czech language model based on Transformer architecture with Multi-Head Attention mechanism.
 
