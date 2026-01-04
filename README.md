@@ -1,4 +1,4 @@
-<center><h1>🇨🇿 SLiM-CZ-V1</h1></center>
+# 🇨🇿 SLiM-CZ-V1
 
 **Slavic Linguistic integrated Micro-model for Czechia**
 
