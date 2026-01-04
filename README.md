@@ -7,6 +7,7 @@
 [![Follow us on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/follow-us-on-hf-sm.svg)](https://huggingface.co/filipsedivy)
 
 A small Czech language model based on Transformer architecture with Multi-Head Attention mechanism.
+
 ---
 
 ## 📋 Project Overview
