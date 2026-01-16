@@ -14,10 +14,12 @@ keywords = [
     "transformer",
     "czech",
     "machine-learning",
-    "deep-learning"
+    "deep-learning",
+    "sentencepiece",
+    "bpe-tokenizer"
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -27,10 +29,12 @@ classifiers = [
     "Topic :: Text Processing :: Linguistic"
 ]
 
+# Core dependencies
 dependencies = [
     "torch>=2.0.0",
     "numpy>=1.21.0",
     "pyyaml>=6.0.0",
+    "sentencepiece>=0.1.99",
 ]
 
 [project.optional-dependencies]
@@ -42,7 +46,6 @@ dev = [
 
 tokenizer = [
     "tokenizers>=0.13.0",
-    "sentencepiece>=0.1.99",
 ]
 
 monitoring = [
@@ -56,7 +59,7 @@ analysis = [
 ]
 
 all = [
-    "slim-cz-v1[tokenizer,monitoring,analysis]"
+    "slim-cz-v1[tokenizer,monitoring,analysis,dev]"
 ]
 
 [project.urls]
