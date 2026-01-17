@@ -1,0 +1,83 @@
+# ============================================================================
+# SLiM-CZ-V1 Medium Configuration
+# ============================================================================
+#
+# Optimized for:
+#   - Medium-sized datasets (5-15M tokens)
+#   - After data augmentation (back-translation, synthesis)
+#   - Better quality at cost of training time
+#
+# Model size: ~10-15M parameters
+# ============================================================================
+
+# Model architecture
+model:
+  vocab_size: 24000
+  d_model: 384
+  num_heads: 8
+  num_layers: 6
+  d_ff: 1536
+  max_seq_len: 512
+  dropout: 0.2
+  weight_tying: true
+
+# Training parameters
+train:
+  # Optimization
+  batch_size: 32
+  learning_rate: 0.00005
+  weight_decay: 0.03
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  
+  # Learning rate schedule
+  warmup_steps: 1000
+  scheduler: cosine
+  min_lr: 1.0e-6
+  
+  # Regularization
+  gradient_clip: 1.0
+  label_smoothing: 0.1
+  
+  # Training duration
+  epochs: 25
+  max_steps: 200000
+  
+  # Logging and evaluation
+  log_every: 100
+  eval_every: 1000
+  save_every: 5000
+  
+  # Early stopping
+  patience: 6
+  min_delta: 0.0003
+  
+  # Optional monitoring
+  use_tensorboard: false
+
+# Generation parameters
+generation:
+  max_new_tokens: 150
+  temperature: 0.7
+  top_k: 50
+  top_p: 0.95
+  repetition_penalty: 1.15
+  do_sample: true
+
+# Data preprocessing
+data:
+  # Dataset splits
+  train_split: 0.92
+  val_split: 0.04
+  test_split: 0.04
+  
+  # Sequence configuration
+  seq_len: 512
+  stride: 256
+  
+  # Text processing
+  lowercase: false
+  remove_urls: true
+  remove_emails: true
+  min_line_length: 10
+  min_frequency: 2
