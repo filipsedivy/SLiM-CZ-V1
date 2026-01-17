@@ -11,7 +11,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -31,759 +31,501 @@ try:
     HAS_TENSORBOARD = True
 except ImportError:
     HAS_TENSORBOARD = False
+    print("[WARNING] TensorBoard not available. Install with: pip install tensorboard")
 
 from model import SLiM_CZ_V1
 from dataloader import load_preprocessed_data, create_dataloaders
 
 
-# ============================================================================
-# ANSI Color Codes
-# ============================================================================
+class TensorBoardLogger:
+    """Enhanced TensorBoard logger with comprehensive metrics."""
 
-class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
+    def __init__(self, log_dir: Path, enabled: bool = True):
+        self.enabled = enabled and HAS_TENSORBOARD
+        self.writer = None
 
-
-# ============================================================================
-# Progress Bar
-# ============================================================================
-
-class ProgressBar:
-    """Simple progress bar for console output."""
-
-    def __init__(self, total: int, desc: str = "", width: int = 40):
-        self.total = total
-        self.desc = desc
-        self.width = width
-        self.current = 0
-        self.start_time = time.time()
-        self.last_update = 0
-
-    def update(self, n: int = 1, loss: float = None):
-        """Update progress bar."""
-        self.current += n
-        current_time = time.time()
-
-        # Update every 0.1 seconds to avoid flickering
-        if current_time - self.last_update < 0.1 and self.current < self.total:
-            return
-
-        self.last_update = current_time
-        self._draw(loss)
-
-    def _draw(self, loss: float = None):
-        """Draw progress bar."""
-        if self.total == 0:
-            return
-
-        percent = min(self.current / self.total, 1.0)
-        filled = int(self.width * percent)
-        bar = '█' * filled + '░' * (self.width - filled)
-
-        elapsed = time.time() - self.start_time
-        if self.current > 0:
-            eta = elapsed / self.current * (self.total - self.current)
-            eta_str = f"ETA: {eta:.0f}s" if eta > 0 else "ETA: 0s"
+        if self.enabled:
+            self.writer = SummaryWriter(log_dir=str(log_dir / 'tensorboard'))
+            print(f"✓ TensorBoard logging enabled: {log_dir / 'tensorboard'}")
+            print(f"  View with: tensorboard --logdir {log_dir / 'tensorboard'}")
         else:
-            eta_str = "ETA: --"
+            if not HAS_TENSORBOARD:
+                print("⚠ TensorBoard not installed - logging disabled")
+            else:
+                print("ℹ TensorBoard logging disabled")
 
-        loss_str = f"loss: {loss:.4f} " if loss is not None else ""
+    def log_metrics(self, metrics: Dict[str, float], step: int, prefix: str = ""):
+        """Log scalar metrics."""
+        if not self.enabled:
+            return
 
-        sys.stdout.write(
-            f'\r{self.desc} |{bar}| {self.current}/{self.total} '
-            f'({percent*100:.0f}%) {loss_str}{eta_str}'
-        )
-        sys.stdout.flush()
+        for name, value in metrics.items():
+            tag = f"{prefix}/{name}" if prefix else name
+            self.writer.add_scalar(tag, value, step)
 
-        if self.current >= self.total:
-            print()  # New line when complete
+    def log_lr(self, lr: float, step: int):
+        """Log learning rate."""
+        if not self.enabled:
+            return
+        self.writer.add_scalar('Training/learning_rate', lr, step)
+
+    def log_gradients(self, model: nn.Module, step: int):
+        """Log gradient statistics."""
+        if not self.enabled:
+            return
+
+        total_norm = 0.0
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+
+                # Log per-parameter gradients
+                self.writer.add_histogram(f'Gradients/{name}', param.grad.data, step)
+
+        total_norm = total_norm ** 0.5
+        self.writer.add_scalar('Gradients/total_norm', total_norm, step)
+
+    def log_weights(self, model: nn.Module, step: int):
+        """Log model weights."""
+        if not self.enabled:
+            return
+
+        for name, param in model.named_parameters():
+            self.writer.add_histogram(f'Weights/{name}', param.data, step)
+
+    def log_text_samples(self, prompts: list, generated: list, step: int):
+        """Log generated text samples."""
+        if not self.enabled:
+            return
+
+        text = "\n\n".join([
+            f"**Prompt:** {p}\n**Generated:** {g}"
+            for p, g in zip(prompts, generated)
+        ])
+        self.writer.add_text('Generations/samples', text, step)
+
+    def log_model_graph(self, model: nn.Module, input_tensor: torch.Tensor):
+        """Log model graph."""
+        if not self.enabled:
+            return
+
+        try:
+            self.writer.add_graph(model, input_tensor)
+        except Exception as e:
+            print(f"⚠ Could not log model graph: {e}")
+
+    def log_config(self, config: Dict):
+        """Log configuration as text."""
+        if not self.enabled:
+            return
+
+        config_text = yaml.dump(config, default_flow_style=False)
+        self.writer.add_text('Config/full_config', f"```yaml\n{config_text}\n```", 0)
+
+    def log_dataset_info(self, stats: Dict, step: int = 0):
+        """Log dataset statistics."""
+        if not self.enabled:
+            return
+
+        info_text = f"""
+**Dataset Statistics:**
+- Vocabulary size: {stats.get('vocab_size', 'N/A'):,}
+- Sequence length: {stats.get('seq_len', 'N/A')}
+- Training sequences: {stats.get('train_sequences', 'N/A'):,}
+- Validation sequences: {stats.get('val_sequences', 'N/A'):,}
+- Total tokens: {stats.get('train_sequences', 0) * stats.get('seq_len', 0):,}
+"""
+        self.writer.add_text('Dataset/info', info_text, step)
 
     def close(self):
-        """Complete the progress bar."""
-        self.current = self.total
-        self._draw()
+        """Close writer."""
+        if self.enabled and self.writer:
+            self.writer.close()
 
-
-# ============================================================================
-# Print Utilities
-# ============================================================================
-
-def print_header(text: str):
-    """Print formatted header."""
-    width = 80
-    print(f"\n{'=' * width}")
-    print(f"{text:^{width}}")
-    print(f"{'=' * width}")
-
-
-def print_section(title: str):
-    """Print formatted section."""
-    print(f"\n{Colors.CYAN}{Colors.BOLD}{title}{Colors.ENDC}")
-    print("-" * 80)
-
-
-def print_success(text: str):
-    """Print success message."""
-    print(f"{Colors.GREEN}✓ {text}{Colors.ENDC}")
-
-
-def print_info(text: str):
-    """Print info message."""
-    print(f"{Colors.BLUE}ℹ {text}{Colors.ENDC}")
-
-
-def print_warning(text: str):
-    """Print warning message."""
-    print(f"{Colors.YELLOW}⚠ {text}{Colors.ENDC}")
-
-
-def print_error(text: str):
-    """Print error message."""
-    print(f"{Colors.RED}✗ {text}{Colors.ENDC}")
-
-
-# ============================================================================
-# Loss Function
-# ============================================================================
-
-class LabelSmoothingLoss(nn.Module):
-    """Cross entropy with label smoothing for regularization."""
-
-    def __init__(self, smoothing: float = 0.1):
-        super().__init__()
-        self.smoothing = smoothing
-        self.confidence = 1.0 - smoothing
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred = pred.view(-1, pred.size(-1))
-        target = target.view(-1)
-
-        log_probs = F.log_softmax(pred, dim=-1)
-
-        with torch.no_grad():
-            true_dist = torch.zeros_like(log_probs)
-            true_dist.fill_(self.smoothing / (pred.size(-1) - 1))
-            true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
-
-        return (-true_dist * log_probs).sum(dim=-1).mean()
-
-
-# ============================================================================
-# Learning Rate Scheduler
-# ============================================================================
-
-def get_cosine_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps: int,
-    num_training_steps: int,
-    min_lr_ratio: float = 0.0
-):
-    """
-    Create cosine learning rate schedule with warmup.
-
-    Based on research recommendations:
-    - Linear warmup for first warmup_steps
-    - Cosine decay to min_lr_ratio * initial_lr
-    """
-
-    def lr_lambda(current_step: int):
-        # Warmup phase
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-
-        # Cosine decay phase
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
-        )
-        return max(
-            min_lr_ratio,
-            0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.14159265359)).item())
-        )
-
-    return LambdaLR(optimizer, lr_lambda)
-
-
-# ============================================================================
-# Trainer
-# ============================================================================
 
 class Trainer:
-    """Training manager for SLiM-CZ-V1."""
+    """Enhanced trainer with TensorBoard logging."""
 
-    def __init__(
+    def __init__(self, config: Dict, output_dir: Path, enable_tensorboard: bool = True):
+        self.config = config
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize TensorBoard
+        self.tb_logger = TensorBoardLogger(
+            self.output_dir,
+            enabled=enable_tensorboard and config.get('train', {}).get('use_tensorboard', True)
+        )
+
+        # Training parameters
+        train_cfg = config.get('train', {})
+        self.epochs = train_cfg.get('epochs', 30)
+        self.batch_size = train_cfg.get('batch_size', 32)
+        self.learning_rate = train_cfg.get('learning_rate', 0.0001)
+        self.warmup_steps = train_cfg.get('warmup_steps', 500)
+        self.gradient_clip = train_cfg.get('gradient_clip', 1.0)
+        self.eval_every = train_cfg.get('eval_every', 500)
+        self.log_every = train_cfg.get('log_every', 50)
+        self.save_every = train_cfg.get('save_every', 1000)
+        self.generate_samples_every = train_cfg.get('generate_samples_every', 1000)
+
+        # Best metrics
+        self.best_val_loss = float('inf')
+        self.best_val_perplexity = float('inf')
+
+        # Device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
+
+    def build_model(self, vocab_size: int, seq_len: int) -> nn.Module:
+        """Build model from config."""
+        model_cfg = self.config.get('model', {})
+
+        model = SLiM_CZ_V1(
+            vocab_size=vocab_size,
+            d_model=model_cfg.get('d_model', 256),
+            num_heads=model_cfg.get('num_heads', 8),
+            num_layers=model_cfg.get('num_layers', 4),
+            d_ff=model_cfg.get('d_ff', 1024),
+            max_seq_len=seq_len,
+            dropout=model_cfg.get('dropout', 0.1),
+            weight_tying=model_cfg.get('weight_tying', True)
+        ).to(self.device)
+
+        # Log model info
+        params = model.count_parameters()
+        print(f"\nModel Parameters:")
+        print(f"  Total: {params['total']:,} ({params['total']/1e6:.2f}M)")
+        print(f"  Trainable: {params['trainable']:,}")
+        if model.weight_tying:
+            print(f"  Saved by tying: {params['saved']:,}")
+
+        # Log to TensorBoard
+        self.tb_logger.log_config(self.config)
+
+        return model
+
+    def train_epoch(
         self,
         model: nn.Module,
         train_loader,
-        val_loader,
-        config: Dict[str, Any],
-        device: torch.device,
-        output_dir: Path
-    ):
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.config = config
-        self.device = device
-        self.output_dir = output_dir
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        train_cfg = config['train']
-        self.epochs = train_cfg['epochs']
-        self.gradient_clip = train_cfg.get('gradient_clip', 1.0)
-        self.patience = train_cfg.get('patience', 5)
-        self.min_delta = train_cfg.get('min_delta', 0.0005)
-
-        # Loss function
-        label_smoothing = train_cfg.get('label_smoothing', 0.0)
-        if label_smoothing > 0:
-            self.criterion = LabelSmoothingLoss(smoothing=label_smoothing)
-            print_info(f"Using label smoothing: {label_smoothing}")
-        else:
-            self.criterion = nn.CrossEntropyLoss()
-            print_warning("Label smoothing disabled (recommended: 0.1)")
-
-        # Optimizer
-        self.optimizer = AdamW(
-            model.parameters(),
-            lr=train_cfg['learning_rate'],
-            weight_decay=train_cfg.get('weight_decay', 0.01),
-            betas=tuple(train_cfg.get('betas', [0.9, 0.98])),
-            eps=train_cfg.get('eps', 1e-9)
-        )
-
-        # Learning rate scheduler
-        total_steps = len(train_loader) * self.epochs
-        warmup_steps = train_cfg.get('warmup_steps', 500)
-        min_lr = train_cfg.get('min_lr', 1e-6)
-        min_lr_ratio = min_lr / train_cfg['learning_rate']
-
-        self.scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps,
-            min_lr_ratio=min_lr_ratio
-        )
-
-        print_info(f"Scheduler: Cosine with warmup ({warmup_steps} steps)")
-        print_info(f"Total training steps: {total_steps:,}")
-
-        # TensorBoard
-        self.writer = None
-        if HAS_TENSORBOARD and train_cfg.get('use_tensorboard', False):
-            self.writer = SummaryWriter(log_dir=str(self.output_dir / 'logs'))
-            print_success("TensorBoard logging enabled")
-
-        # Training state
-        self.global_step = 0
-        self.best_val_loss = float('inf')
-        self.patience_counter = 0
-        self.history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_ppl': [],
-            'val_ppl': [],
-            'learning_rate': []
-        }
-
-    def train_epoch(self, epoch: int) -> float:
+        optimizer,
+        scheduler,
+        epoch: int,
+        tokenizer=None
+    ) -> float:
         """Train one epoch."""
-        self.model.train()
+        model.train()
         total_loss = 0
-        num_batches = len(self.train_loader)
+        num_batches = len(train_loader)
 
-        # Progress tracking
         if HAS_TQDM:
-            iterator = tqdm(
-                self.train_loader,
-                desc=f"Epoch {epoch}/{self.epochs}",
-                ncols=100
-            )
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{self.epochs}")
         else:
-            print_info(f"Training epoch {epoch}/{self.epochs}...")
-            pbar = ProgressBar(
-                num_batches,
-                desc=f"  Epoch {epoch}/{self.epochs}",
-                width=40
-            )
-            iterator = self.train_loader
+            pbar = train_loader
 
-        for batch_idx, (input_ids, labels) in enumerate(iterator):
+        for batch_idx, (input_ids, labels) in enumerate(pbar):
             input_ids = input_ids.to(self.device)
             labels = labels.to(self.device)
 
             # Forward pass
-            self.optimizer.zero_grad()
-            logits, _ = self.model(input_ids)
-            loss = self.criterion(logits, labels)
+            logits, _ = model(input_ids)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1)
+            )
 
             # Backward pass
+            optimizer.zero_grad()
             loss.backward()
 
             # Gradient clipping
             if self.gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.gradient_clip
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip)
+
+            optimizer.step()
+            scheduler.step()
+
+            total_loss += loss.item()
+
+            # Global step
+            global_step = (epoch - 1) * num_batches + batch_idx
+
+            # Logging
+            if batch_idx % self.log_every == 0:
+                current_lr = optimizer.param_groups[0]['lr']
+
+                # Log to TensorBoard
+                self.tb_logger.log_metrics({
+                    'batch_loss': loss.item(),
+                    'batch_perplexity': torch.exp(loss).item()
+                }, global_step, prefix='Training')
+
+                self.tb_logger.log_lr(current_lr, global_step)
+
+                # Log gradients periodically
+                if batch_idx % (self.log_every * 5) == 0:
+                    self.tb_logger.log_gradients(model, global_step)
+
+                if HAS_TQDM:
+                    pbar.set_postfix({
+                        'loss': f"{loss.item():.4f}",
+                        'lr': f"{current_lr:.2e}"
+                    })
+
+            # Generate samples
+            if tokenizer and batch_idx % self.generate_samples_every == 0 and batch_idx > 0:
+                self.generate_and_log_samples(model, tokenizer, global_step)
+
+            # Log weights occasionally
+            if batch_idx % (self.save_every // 2) == 0 and batch_idx > 0:
+                self.tb_logger.log_weights(model, global_step)
+
+        return total_loss / num_batches
+
+    def evaluate(self, model: nn.Module, val_loader) -> tuple:
+        """Evaluate model."""
+        model.eval()
+        total_loss = 0
+        num_batches = len(val_loader)
+
+        with torch.no_grad():
+            for input_ids, labels in val_loader:
+                input_ids = input_ids.to(self.device)
+                labels = labels.to(self.device)
+
+                logits, _ = model(input_ids)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1)
                 )
 
-            # Optimizer step
-            self.optimizer.step()
-            self.scheduler.step()
+                total_loss += loss.item()
 
-            # Update metrics
-            total_loss += loss.item()
-            self.global_step += 1
+        avg_loss = total_loss / num_batches
+        perplexity = torch.exp(torch.tensor(avg_loss)).item()
 
-            # Update progress
-            if HAS_TQDM:
-                iterator.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'lr': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
-                })
-            else:
-                pbar.update(1, loss=loss.item())
+        return avg_loss, perplexity
 
-        if not HAS_TQDM:
-            pbar.close()
+    def generate_and_log_samples(
+        self,
+        model: nn.Module,
+        tokenizer,
+        step: int,
+        prompts: Optional[list] = None
+    ):
+        """Generate and log text samples."""
+        if prompts is None:
+            prompts = [
+                "Praha je",
+                "Dnes je krásný",
+                "Česká republika"
+            ]
 
-        return total_loss / num_batches
+        model.eval()
+        generated_texts = []
 
-    @torch.no_grad()
-    def evaluate(self) -> float:
-        """Evaluate on validation set."""
-        self.model.eval()
-        total_loss = 0
-        num_batches = len(self.val_loader)
+        with torch.no_grad():
+            for prompt in prompts:
+                # Encode
+                input_ids = tokenizer.encode(prompt)
+                input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
 
-        if not HAS_TQDM:
-            print_info("Evaluating...")
-            pbar = ProgressBar(num_batches, desc="  Validation", width=40)
+                # Generate
+                generated = model.generate(
+                    input_tensor,
+                    max_length=50,
+                    temperature=0.8,
+                    top_k=50
+                )
 
-        for input_ids, labels in self.val_loader:
-            input_ids = input_ids.to(self.device)
-            labels = labels.to(self.device)
+                # Decode
+                generated_text = tokenizer.decode(generated[0].tolist())
+                generated_texts.append(generated_text)
 
-            logits, _ = self.model(input_ids)
-            loss = self.criterion(logits, labels)
+        model.train()
 
-            total_loss += loss.item()
+        # Log to TensorBoard
+        self.tb_logger.log_text_samples(prompts, generated_texts, step)
 
-            if not HAS_TQDM:
-                pbar.update(1, loss=loss.item())
+        # Print samples
+        print("\n" + "=" * 80)
+        print("GENERATED SAMPLES:")
+        for prompt, gen in zip(prompts, generated_texts):
+            print(f"\nPrompt: {prompt}")
+            print(f"Generated: {gen}")
+        print("=" * 80 + "\n")
 
-        if not HAS_TQDM:
-            pbar.close()
+    def save_checkpoint(self, model, optimizer, epoch, is_best=False):
+        """Save checkpoint."""
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'config': self.config,
+            'best_val_loss': self.best_val_loss,
+            'best_val_perplexity': self.best_val_perplexity,
+        }
 
-        return total_loss / num_batches
+        # Save regular checkpoint
+        checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch}.pt'
+        torch.save(checkpoint, checkpoint_path)
+        print(f"✓ Checkpoint saved: {checkpoint_path}")
 
-    def train(self):
+        # Save best model
+        if is_best:
+            best_path = self.output_dir / 'best_model.pt'
+            torch.save(checkpoint, best_path)
+            print(f"✓ Best model saved: {best_path}")
+
+    def train(self, data_dir: str, tokenizer_path: Optional[str] = None):
         """Main training loop."""
-        print_section("🚀 Starting Training")
-        print_info(f"Training for {self.epochs} epochs")
-        print_info(f"Device: {self.device}")
-        print_info(f"Output directory: {self.output_dir}")
-        print_info(f"Early stopping patience: {self.patience} epochs")
+        print("\n" + "=" * 80)
+        print("SLiM-CZ-V1 Training with TensorBoard")
+        print("=" * 80)
+
+        # Load data
+        print("\nLoading data...")
+        train_sequences, val_sequences, stats = load_preprocessed_data(data_dir)
+
+        vocab_size = stats['vocab_size']
+        seq_len = stats['seq_len']
+
+        print(f"  Train sequences: {len(train_sequences):,}")
+        print(f"  Val sequences: {len(val_sequences):,}")
+        print(f"  Vocabulary: {vocab_size:,}")
+        print(f"  Sequence length: {seq_len}")
+
+        # Log dataset info
+        self.tb_logger.log_dataset_info(stats)
+
+        # Create dataloaders
+        train_loader, val_loader = create_dataloaders(
+            train_sequences,
+            val_sequences,
+            batch_size=self.batch_size
+        )
+
+        # Build model
+        model = self.build_model(vocab_size, seq_len)
+
+        # Log model graph
+        sample_input = torch.randint(0, vocab_size, (1, seq_len)).to(self.device)
+        self.tb_logger.log_model_graph(model, sample_input)
+
+        # Optimizer and scheduler
+        optimizer = AdamW(
+            model.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.config.get('train', {}).get('weight_decay', 0.01)
+        )
+
+        def lr_lambda(step):
+            if step < self.warmup_steps:
+                return step / self.warmup_steps
+            return 1.0
+
+        scheduler = LambdaLR(optimizer, lr_lambda)
+
+        # Load tokenizer for sample generation
+        tokenizer = None
+        if tokenizer_path:
+            try:
+                import sentencepiece as spm
+                tokenizer = spm.SentencePieceProcessor()
+                tokenizer.load(tokenizer_path)
+                print(f"✓ Tokenizer loaded for sample generation")
+            except Exception as e:
+                print(f"⚠ Could not load tokenizer: {e}")
+
+        # Training loop
+        print(f"\nStarting training for {self.epochs} epochs...")
+        print(f"Output directory: {self.output_dir}")
+        print(f"TensorBoard: tensorboard --logdir {self.output_dir / 'tensorboard'}")
         print()
 
         for epoch in range(1, self.epochs + 1):
             epoch_start = time.time()
 
             # Train
-            train_loss = self.train_epoch(epoch)
+            train_loss = self.train_epoch(
+                model, train_loader, optimizer, scheduler, epoch, tokenizer
+            )
 
-            # Validate
-            val_loss = self.evaluate()
+            # Evaluate
+            val_loss, val_ppl = self.evaluate(model, val_loader)
 
-            # Calculate perplexity
-            train_ppl = torch.exp(torch.tensor(train_loss)).item()
-            val_ppl = torch.exp(torch.tensor(val_loss)).item()
-            lr = self.optimizer.param_groups[0]['lr']
+            # Log epoch metrics
+            self.tb_logger.log_metrics({
+                'train_loss': train_loss,
+                'train_perplexity': torch.exp(torch.tensor(train_loss)).item(),
+            }, epoch, prefix='Epoch')
 
-            # Update history
-            self.history['train_loss'].append(train_loss)
-            self.history['val_loss'].append(val_loss)
-            self.history['train_ppl'].append(train_ppl)
-            self.history['val_ppl'].append(val_ppl)
-            self.history['learning_rate'].append(lr)
+            self.tb_logger.log_metrics({
+                'val_loss': val_loss,
+                'val_perplexity': val_ppl,
+            }, epoch, prefix='Epoch')
 
-            # TensorBoard logging
-            if self.writer:
-                self.writer.add_scalar('Loss/train', train_loss, epoch)
-                self.writer.add_scalar('Loss/val', val_loss, epoch)
-                self.writer.add_scalar('Perplexity/train', train_ppl, epoch)
-                self.writer.add_scalar('Perplexity/val', val_ppl, epoch)
-                self.writer.add_scalar('Learning_Rate', lr, epoch)
+            # Check if best model
+            is_best = val_loss < self.best_val_loss
+            if is_best:
+                self.best_val_loss = val_loss
+                self.best_val_perplexity = val_ppl
 
-            # Print epoch summary
+            # Print summary
             elapsed = time.time() - epoch_start
             print()
-            print(f"{Colors.BOLD}Epoch {epoch}/{self.epochs} Summary{Colors.ENDC} (Time: {elapsed:.1f}s)")
-            print("-" * 80)
-            print(f"  Train Loss:      {train_loss:.4f}  |  Perplexity: {train_ppl:.2f}")
-            print(f"  Validation Loss: {val_loss:.4f}  |  Perplexity: {val_ppl:.2f}")
-            print(f"  Learning Rate:   {lr:.2e}")
-
-            # Check for improvement
-            if val_loss < self.best_val_loss - self.min_delta:
-                improvement = self.best_val_loss - val_loss
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                self.save_checkpoint('best_model.pt')
-                print(f"  {Colors.GREEN}✓ New best model! (↓ {improvement:.4f}){Colors.ENDC}")
-            else:
-                self.patience_counter += 1
-                print(f"  {Colors.YELLOW}⚠ No improvement ({self.patience_counter}/{self.patience}){Colors.ENDC}")
-
-                if self.patience_counter >= self.patience:
-                    print()
-                    print_warning(f"Early stopping triggered after {epoch} epochs")
-                    print_info(f"Best validation loss: {self.best_val_loss:.4f}")
-                    break
-
+            print(f"Epoch {epoch}/{self.epochs} Summary ({elapsed:.1f}s)")
+            print(f"  Train Loss: {train_loss:.4f}  |  Train PPL: {torch.exp(torch.tensor(train_loss)):.2f}")
+            print(f"  Val Loss:   {val_loss:.4f}  |  Val PPL:   {val_ppl:.2f}")
+            if is_best:
+                print(f"  ✓ New best model!")
             print()
 
-        # Save final model
-        self.save_checkpoint('final_model.pt')
-        self.save_history()
+            # Save checkpoint
+            if epoch % 5 == 0 or is_best:
+                self.save_checkpoint(model, optimizer, epoch, is_best)
 
-        if self.writer:
-            self.writer.close()
+        # Final save
+        self.save_checkpoint(model, optimizer, self.epochs, is_best=False)
 
-        # Print final summary
-        print_header("✅ Training Completed")
-        print()
-        print(f"  Total epochs trained: {len(self.history['train_loss'])}")
-        print(f"  Best validation loss: {self.best_val_loss:.4f}")
-        print(f"  Best validation PPL:  {torch.exp(torch.tensor(self.best_val_loss)):.2f}")
-        print(f"  Models saved in:      {self.output_dir}")
-        print()
-        print_success("Training finished successfully!")
+        print("\n" + "=" * 80)
+        print("Training completed!")
+        print(f"Best validation loss: {self.best_val_loss:.4f}")
+        print(f"Best perplexity: {self.best_val_perplexity:.2f}")
+        print(f"Output directory: {self.output_dir}")
+        print(f"\nView TensorBoard:")
+        print(f"  tensorboard --logdir {self.output_dir / 'tensorboard'}")
         print("=" * 80)
 
-    def save_checkpoint(self, filename: str):
-        """Save model checkpoint."""
-        checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'config': self.config,
-            'epoch': len(self.history['train_loss']),
-            'best_val_loss': self.best_val_loss,
-            'history': self.history,
-            'global_step': self.global_step
-        }
-        torch.save(checkpoint, self.output_dir / filename)
-
-    def save_history(self):
-        """Save training history."""
-        with open(self.output_dir / 'history.json', 'w') as f:
-            json.dump(self.history, f, indent=2)
-        print_success("Training history saved: history.json")
-
-
-# ============================================================================
-# Configuration Validation
-# ============================================================================
-
-def validate_config(config: Dict[str, Any]):
-    """
-    Validate configuration against research recommendations.
-    Print warnings for suboptimal settings.
-    """
-    print_section("🔍 Configuration Validation")
-
-    warnings_found = False
-
-    # Model parameters
-    model_cfg = config['model']
-    train_cfg = config['train']
-
-    # Dropout
-    dropout = model_cfg.get('dropout', 0.1)
-    if dropout < 0.2:
-        print_warning(f"Dropout ({dropout}) is low. Recommended: 0.2-0.3 for small datasets")
-        warnings_found = True
-    else:
-        print_success(f"Dropout: {dropout} (optimal for small datasets)")
-
-    # Weight decay
-    weight_decay = train_cfg.get('weight_decay', 0.01)
-    if weight_decay < 0.05:
-        print_warning(f"Weight decay ({weight_decay}) is low. Recommended: 0.05-0.1")
-        warnings_found = True
-    else:
-        print_success(f"Weight decay: {weight_decay} (aggressive regularization)")
-
-    # Label smoothing
-    label_smoothing = train_cfg.get('label_smoothing', 0.0)
-    if label_smoothing < 0.1:
-        print_warning(f"Label smoothing ({label_smoothing}) is low. Recommended: 0.1")
-        warnings_found = True
-    else:
-        print_success(f"Label smoothing: {label_smoothing}")
-
-    # Epochs
-    epochs = train_cfg.get('epochs', 10)
-    if epochs < 20:
-        print_warning(f"Epochs ({epochs}) is low. Recommended: 20-50 for small datasets")
-        warnings_found = True
-    else:
-        print_success(f"Epochs: {epochs} (sufficient for small datasets)")
-
-    # Weight tying
-    weight_tying = model_cfg.get('weight_tying', False)
-    if not weight_tying:
-        print_warning("Weight tying disabled. Recommended: enabled (saves ~30% params)")
-        warnings_found = True
-    else:
-        print_success("Weight tying: enabled (optimal parameter efficiency)")
-
-    if not warnings_found:
-        print_success("All parameters optimally configured!")
-
-    print()
-
-
-# ============================================================================
-# Main
-# ============================================================================
-
-def load_config(config_path: Path, args) -> Dict[str, Any]:
-    """Load and merge configuration."""
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-
-    # Override with CLI arguments
-    if args.epochs:
-        config['train']['epochs'] = args.epochs
-    if args.batch_size:
-        config['train']['batch_size'] = args.batch_size
-    if args.learning_rate:
-        config['train']['learning_rate'] = args.learning_rate
-    if args.dropout:
-        config['model']['dropout'] = args.dropout
-    if args.weight_decay:
-        config['train']['weight_decay'] = args.weight_decay
-
-    return config
+        # Close TensorBoard
+        self.tb_logger.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='🇨🇿 SLiM-CZ-V1 Training Script',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python train.py --data-dir ./data --config config.yaml
-  python train.py --data-dir ./data --config config.yaml --epochs 30
-  python train.py --data-dir ./data --config config.yaml --batch-size 64 --dropout 0.25
-        """
-    )
-
-    # Required arguments
-    parser.add_argument(
-        '--data-dir',
-        type=str,
-        required=True,
-        help='Directory with preprocessed data (train.json, val.json, stats.json)'
-    )
-    parser.add_argument(
-        '--config',
-        type=str,
-        required=True,
-        help='Configuration YAML file'
-    )
-
-    # Optional arguments
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        default='./output',
-        help='Output directory for models and logs (default: ./output)'
-    )
-    parser.add_argument(
-        '--device',
-        type=str,
-        default=None,
-        help='Device to use: cuda, cpu (default: auto-detect)'
-    )
-
-    # Training overrides
-    parser.add_argument('--epochs', type=int, help='Override number of epochs')
-    parser.add_argument('--batch-size', type=int, help='Override batch size')
-    parser.add_argument('--learning-rate', type=float, help='Override learning rate')
-    parser.add_argument('--dropout', type=float, help='Override dropout rate')
-    parser.add_argument('--weight-decay', type=float, help='Override weight decay')
+    parser = argparse.ArgumentParser(description='Train SLiM-CZ-V1 with TensorBoard')
+    parser.add_argument('--config', type=str, required=True, help='Path to config YAML')
+    parser.add_argument('--data-dir', type=str, required=True, help='Path to prepared data')
+    parser.add_argument('--output-dir', type=str, required=True, help='Output directory')
+    parser.add_argument('--tokenizer', type=str, help='Path to tokenizer for sample generation')
+    parser.add_argument('--no-tensorboard', action='store_true', help='Disable TensorBoard')
 
     args = parser.parse_args()
 
-    # Print header
-    print_header("🇨🇿 SLiM-CZ-V1 Training")
-    print(f"{Colors.BOLD}Slavic Linguistic integrated Micro-model for Czechia{Colors.ENDC}".center(80))
-    print(f"{Colors.BOLD}Optimized for small Czech datasets (2-5M tokens){Colors.ENDC}".center(80))
+    # Load config
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
 
-    # Load configuration
-    print_section("📋 Loading Configuration")
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print_error(f"Configuration file not found: {args.config}")
-        return
-
-    config = load_config(config_path, args)
-    print_success(f"Configuration loaded: {args.config}")
-
-    # Validate configuration
-    validate_config(config)
-
-    # Load data
-    print_section("📦 Loading Dataset")
-    print_info(f"Data directory: {args.data_dir}")
-
-    try:
-        train_seqs, val_seqs, stats = load_preprocessed_data(args.data_dir)
-    except Exception as e:
-        print_error(f"Failed to load data: {e}")
-        return
-
-    print_success(f"Training sequences:   {len(train_seqs):,}")
-    print_success(f"Validation sequences: {len(val_seqs):,}")
-    print_info(f"Vocabulary size:      {stats['vocab_size']:,}")
-    print_info(f"Sequence length:      {stats['seq_len']}")
-
-    # Calculate dataset size
-    total_tokens = len(train_seqs) * stats['seq_len']
-    print_info(f"Total training tokens: {total_tokens:,} (~{total_tokens/1e6:.1f}M)")
-
-    # Chinchilla scaling recommendations
-    optimal_params = int(total_tokens / 1e6 * 125000)  # 100-150k per 1M tokens
-    print_info(f"Optimal params (Chinchilla): ~{optimal_params/1e6:.1f}M")
-    print()
-
-    # Create dataloaders
-    print_section("🔄 Creating DataLoaders")
-    batch_size = config['train']['batch_size']
-
-    train_loader, val_loader = create_dataloaders(
-        train_seqs,
-        val_seqs,
-        batch_size=batch_size,
-        pin_memory=torch.cuda.is_available()
-    )
-
-    print_success(f"Batch size: {batch_size}")
-    print_info(f"Training batches:   {len(train_loader):,}")
-    print_info(f"Validation batches: {len(val_loader):,}")
-    print()
-
-    # Setup device
-    if args.device:
-        device = torch.device(args.device)
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    print_section("💻 Device Configuration")
-    print_info(f"Device: {device}")
-    if device.type == 'cuda':
-        print_info(f"GPU: {torch.cuda.get_device_name(0)}")
-        print_info(f"CUDA version: {torch.version.cuda}")
-    print()
-
-    # Create model
-    print_section("🏗️  Building Model")
-    print_info("Creating SLiM-CZ-V1...")
-
-    model = SLiM_CZ_V1(
-        vocab_size=stats['vocab_size'],
-        d_model=config['model']['d_model'],
-        num_heads=config['model']['num_heads'],
-        num_layers=config['model']['num_layers'],
-        d_ff=config['model']['d_ff'],
-        max_seq_len=stats['seq_len'],
-        dropout=config['model']['dropout'],
-        weight_tying=config['model'].get('weight_tying', True)
-    ).to(device)
-
-    params = model.count_parameters()
-    total_params = params['total']
-
-    print_success("Model created successfully!")
-    print()
-    print(f"  Architecture:")
-    print(f"    Layers:      {config['model']['num_layers']}")
-    print(f"    Heads:       {config['model']['num_heads']}")
-    print(f"    Embedding:   {config['model']['d_model']}")
-    print(f"    FFN:         {config['model']['d_ff']}")
-    print(f"    Dropout:     {config['model']['dropout']}")
-    print()
-    print(f"  Parameters:")
-    print(f"    Total:       {total_params:,} ({total_params/1e6:.2f}M)")
-    print(f"    Trainable:   {params['trainable']:,}")
-
-    if model.weight_tying:
-        print(f"    Saved (tying): {params['saved']:,} ({params['saved']/total_params*100:.1f}%)")
-        print_success("Weight tying enabled (efficient!)")
-
-    # Check if model size is reasonable
-    print()
-    if total_params > optimal_params * 10:
-        print_warning(
-            f"Model ({total_params/1e6:.1f}M params) may be too large for dataset "
-            f"({total_tokens/1e6:.1f}M tokens). Consider reducing layers/dimensions."
-        )
-    elif total_params > optimal_params * 3:
-        print_info(
-            f"Model size acceptable with aggressive regularization. "
-            f"Monitor for overfitting."
-        )
-    else:
-        print_success(f"Model size optimal for dataset!")
-    print()
-
-    # Print research-based optimizations
-    print_section("✨ Research-Based Optimizations")
-    print(f"   {Colors.GREEN}✓{Colors.ENDC} SentencePiece BPE tokenizer (Czech-optimized)")
-    print(f"   {Colors.GREEN}✓{Colors.ENDC} Label smoothing (prevents overconfidence)")
-    print(f"   {Colors.GREEN}✓{Colors.ENDC} Cosine LR schedule with warmup")
-    print(f"   {Colors.GREEN}✓{Colors.ENDC} Gradient clipping (stability)")
-    print(f"   {Colors.GREEN}✓{Colors.ENDC} Early stopping (prevents overfitting)")
-    if config['model'].get('weight_tying', False):
-        print(f"   {Colors.GREEN}✓{Colors.ENDC} Weight tying (parameter efficiency)")
-    if config['model']['dropout'] >= 0.2:
-        print(f"   {Colors.GREEN}✓{Colors.ENDC} Aggressive dropout (regularization)")
-    if config['train'].get('weight_decay', 0) >= 0.05:
-        print(f"   {Colors.GREEN}✓{Colors.ENDC} Strong weight decay (regularization)")
-    print()
-
-    # Create trainer and start training
+    # Create trainer
     trainer = Trainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        config=config,
-        device=device,
-        output_dir=Path(args.output_dir)
+        config,
+        args.output_dir,
+        enable_tensorboard=not args.no_tensorboard
     )
 
-    try:
-        trainer.train()
-    except KeyboardInterrupt:
-        print()
-        print_warning("Training interrupted by user")
-        trainer.save_checkpoint('interrupted.pt')
-        print_success("Model checkpoint saved: interrupted.pt")
-    except Exception as e:
-        print()
-        print_error(f"Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return
+    # Train
+    trainer.train(args.data_dir, args.tokenizer)
 
 
 if __name__ == "__main__":
