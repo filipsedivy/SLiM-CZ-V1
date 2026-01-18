@@ -25,8 +25,8 @@ except ImportError:
     HAS_TENSORBOARD = False
     print("[WARNING] TensorBoard not available. Install with: pip install tensorboard")
 
-from model import SLiM_CZ_V1
-from dataloader import load_preprocessed_data, create_dataloaders
+from slim_cz_v1 import SLiM_CZ_V1
+from slim_cz_v1.dataloader import load_preprocessed_data, create_dataloaders
 
 
 class TensorBoardLogger:
