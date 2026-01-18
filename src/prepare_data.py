@@ -1,10 +1,3 @@
-"""
-Data Preparation Pipeline for SLiM-CZ-V1
-Slavic Linguistic integrated Micro-model for Czechia
-
-Uses SentencePiece BPE tokenizer optimized for Czech language.
-"""
-
 import argparse
 import json
 import re

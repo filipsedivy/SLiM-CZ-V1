@@ -1,11 +1,3 @@
-"""
-Inference Script for SLiM-CZ-V1
-Slavic Linguistic integrated Micro-model for Czechia
-
-Version: 0.1.0
-Text generation and completion utilities for trained models.
-"""
-
 import argparse
 import json
 import sys

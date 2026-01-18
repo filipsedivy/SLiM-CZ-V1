@@ -1,10 +1,3 @@
-"""
-SLiM-CZ-V1 Model
-Version: 0.1.0
-
-Just the model architecture, nothing else.
-"""
-
 import math
 import torch
 import torch.nn as nn

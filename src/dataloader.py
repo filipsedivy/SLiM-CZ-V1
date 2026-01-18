@@ -1,8 +1,3 @@
-"""
-Data loading utilities
-Version: 0.1.0
-"""
-
 import json
 from pathlib import Path
 from typing import List, Tuple, Dict

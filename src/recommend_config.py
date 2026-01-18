@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-SLiM-CZ-V1 Intelligent Config Recommender
-Mathematical analysis and prediction-based configuration recommendation.
-
-Uses:
-  - Chinchilla scaling laws
-  - Parameter counting
-  - Loss prediction
-  - Heuristic optimization
-"""
-
 import json
 import yaml
 import math

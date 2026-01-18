@@ -1,11 +1,3 @@
-"""
-Training script for SLiM-CZ-V1
-Slavic Linguistic integrated Micro-model for Czechia
-
-Version: 0.2.0
-Optimized for small Czech datasets (2-5M tokens) based on research recommendations.
-"""
-
 import argparse
 import json
 import sys

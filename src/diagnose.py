@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Diagnostic Script for SLiM-CZ-V1
-Identifies common issues with model inference quality.
-"""
-
 import sys
 from pathlib import Path
 import json
