@@ -80,12 +80,166 @@ pip install tqdm tensorboard  # Optional: for progress bars and visualization
 
 ---
 
+## 🔧 Command Line Interface (CLI)
+
+After installing the package with `pip install -e .` (or `uv pip install -e .`), five CLI commands become available in your environment. These provide a convenient way to work with SLiM-CZ-V1 without directly calling Python scripts.
+
+### Available Commands
+
+| Command | Purpose |
+|---------|---------|
+| `slim-prepare-data` | Prepare and tokenize training data |
+| `slim-recommend` | Get optimal configuration recommendations |
+| `slim-train` | Train the language model |
+| `slim-inference` | Generate text with trained model |
+| `slim-diagnose` | Diagnose model and training issues |
+
+### Usage Examples
+
+#### 1. Data Preparation
+
+```bash
+# Using CLI command (recommended after installation)
+slim-prepare-data \
+    --input ./raw_texts \
+    --output ./data \
+    --vocab-size 16000 \
+    --seq-len 512
+
+# Or using Python script directly
+python prepare_data.py --input ./raw_texts --output ./data --vocab-size 16000 --seq-len 512
+```
+
+**Options:**
+- `--input, -i` (required): Input directory with text files
+- `--output, -o` (required): Output directory for processed data
+- `--vocab-size`: Vocabulary size (default: 16000)
+- `--seq-len`: Sequence length (default: 512)
+- `--stride`: Stride for sequences (default: 256)
+- `--train-split`: Training split ratio (default: 0.90)
+- `--val-split`: Validation split ratio (default: 0.05)
+- `--test-split`: Test split ratio (default: 0.05)
+- `--remove-urls`: Remove URLs from text (default: enabled)
+- `--remove-emails`: Remove emails from text (default: enabled)
+- `--min-line-length`: Minimum line length (default: 10)
+
+#### 2. Configuration Recommendation
+
+```bash
+# Using CLI command
+slim-recommend --data-dir ./data
+
+# Or using Python script
+python recommend_config.py ./data
+```
+
+**Arguments:**
+- `data_dir` (required): Path to prepared data directory
+- `config_dir` (optional): Directory for config files (default: current directory)
+
+#### 3. Model Training
+
+```bash
+# Using CLI command
+slim-train \
+    --config slim_cz_v1_default.yaml \
+    --data-dir ./data \
+    --output-dir ./output \
+    --tokenizer ./data/tokenizer.model
+
+# Or using Python script
+python train.py --config slim_cz_v1_default.yaml --data-dir ./data --output-dir ./output
+```
+
+**Options:**
+- `--config` (required): Path to configuration YAML file
+- `--data-dir` (required): Path to prepared data directory
+- `--output-dir` (required): Output directory for checkpoints and logs
+- `--tokenizer`: Path to tokenizer for sample generation (optional)
+- `--no-tensorboard`: Disable TensorBoard logging (optional)
+
+#### 4. Text Inference/Generation
+
+```bash
+# Interactive mode (recommended)
+slim-inference \
+    --checkpoint ./output/best_model.pt \
+    --tokenizer ./data/tokenizer.model
+
+# Single prompt generation
+slim-inference \
+    --checkpoint ./output/best_model.pt \
+    --tokenizer ./data/tokenizer.model \
+    --prompt "Praha je" \
+    --max-tokens 100 \
+    --temperature 0.8
+
+# Batch generation from file
+slim-inference \
+    --checkpoint ./output/best_model.pt \
+    --tokenizer ./data/tokenizer.model \
+    --prompts-file ./prompts.txt \
+    --output ./results.txt
+
+# Or using Python script
+python inference.py --checkpoint ./output/best_model.pt --tokenizer ./data/tokenizer.model
+```
+
+**Options:**
+- `--checkpoint` (required): Path to model checkpoint (.pt file)
+- `--tokenizer` (required): Path to tokenizer model (.model file)
+- `--prompt`: Single prompt for generation (optional)
+- `--prompts-file`: File with prompts, one per line (optional)
+- `--output`: Output file for batch generation (optional)
+- `--max-tokens`: Maximum tokens to generate (default: 100)
+- `--temperature`: Sampling temperature (default: 0.8)
+- `--top-k`: Top-k sampling (default: 50)
+- `--top-p`: Nucleus sampling threshold (default: 0.95)
+- `--repetition-penalty`: Repetition penalty (default: 1.2)
+- `--no-sample`: Use greedy decoding instead of sampling
+- `--device`: Device to use: cuda or cpu (default: auto-detect)
+
+#### 5. Model Diagnosis
+
+```bash
+# Using CLI command
+slim-diagnose ./output/best_model.pt ./data/tokenizer.model ./data
+
+# Or using Python script
+python diagnose.py ./output/best_model.pt ./data/tokenizer.model ./data
+```
+
+**Arguments:**
+- `checkpoint_path` (required): Path to model checkpoint
+- `tokenizer_path` (required): Path to tokenizer model
+- `data_dir` (optional): Path to data directory for validation
+
+### CLI vs Direct Python Scripts
+
+Both approaches work identically, but CLI commands offer advantages:
+
+**CLI Commands (`slim-*`):**
+- ✅ Available system-wide after installation
+- ✅ Shorter, cleaner syntax
+- ✅ Tab completion support (in some shells)
+- ✅ No need to remember script locations
+- ✅ Professional deployment ready
+
+**Direct Python Scripts (`python *.py`):**
+- ✅ Works without package installation
+- ✅ Easier for development/debugging
+- ✅ More transparent about execution
+
+**Recommendation:** Use CLI commands for production workflows and direct scripts for development.
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Prepare Your Data
 
 ```bash
-python prepare_data.py \
+slim-prepare-data \
     --input ./raw_texts \
     --output ./data \
     --vocab-size 16000 \
@@ -103,7 +257,7 @@ This creates:
 ### 2. Recommend Optimal Configuration
 
 ```bash
-python recommend_config.py --data-dir ./data
+slim-recommend --data-dir ./data
 ```
 
 This tool analyzes your dataset and recommends the best model configuration based on:
@@ -116,7 +270,7 @@ This tool analyzes your dataset and recommends the best model configuration base
 
 ```bash
 # Train with recommended config
-python train.py \
+slim-train \
     --data-dir ./data \
     --config slim_cz_v1_default.yaml \
     --output-dir ./output
@@ -134,12 +288,12 @@ The training script:
 
 ```bash
 # Interactive mode
-python inference.py \
+slim-inference \
     --checkpoint ./output/best_model.pt \
     --tokenizer ./data/tokenizer.model
 
 # One-time generation
-python inference.py \
+slim-inference \
     --checkpoint ./output/best_model.pt \
     --tokenizer ./data/tokenizer.model \
     --prompt "Praha je" \
@@ -206,23 +360,23 @@ data:
 
 ```bash
 # Use predefined config (recommended)
-python train.py \
+slim-train \
     --data-dir ./data \
     --config slim_cz_v1_tiny.yaml \
     --output-dir ./output
 
-python train.py \
+slim-train \
     --data-dir ./data \
     --config slim_cz_v1_default.yaml \
     --output-dir ./output
 
-python train.py \
+slim-train \
     --data-dir ./data \
     --config slim_cz_v1_medium.yaml \
     --output-dir ./output
 
 # Use custom config file
-python train.py \
+slim-train \
     --data-dir ./data \
     --config path/to/custom.yaml \
     --output-dir ./output
@@ -234,17 +388,17 @@ python train.py \
 
 ```bash
 # 1. Prepare your text data (Czech text files)
-python prepare_data.py \
+slim-prepare-data \
     --input ./czech_texts \
     --output ./data \
     --vocab-size 16000 \
     --seq-len 512
 
 # 2. Analyze dataset and get recommendation
-python recommend_config.py --data-dir ./data
+slim-recommend --data-dir ./data
 
 # 3. Train with recommended configuration
-python train.py \
+slim-train \
     --data-dir ./data \
     --config slim_cz_v1_default.yaml \
     --output-dir ./output
@@ -253,13 +407,13 @@ python train.py \
 tensorboard --logdir ./output/tensorboard
 
 # 5. Test generation
-python inference.py \
+slim-inference \
     --checkpoint ./output/best_model.pt \
     --tokenizer ./data/tokenizer.model \
     --prompt "Dnes je krásný den"
 
 # 6. Diagnose model quality
-python diagnose.py \
+slim-diagnose \
     ./output/best_model.pt \
     ./data/tokenizer.model \
     ./data
@@ -302,7 +456,7 @@ The configurations follow research-backed scaling laws:
 - **Default** (7.2M params): Optimal for 2-5M tokens
 - **Medium** (19.8M params): Optimal for 5-15M tokens
 
-Using a model too large for your dataset leads to overfitting. Use `recommend_config.py` to find the optimal match.
+Using a model too large for your dataset leads to overfitting. Use `slim-recommend` to find the optimal match.
 
 ---
 
@@ -319,7 +473,7 @@ Using a model too large for your dataset leads to overfitting. Use `recommend_co
 ### Advanced Options
 
 ```bash
-python prepare_data.py \
+slim-prepare-data \
     --input ./texts \
     --output ./data \
     --vocab-size 16000 \
@@ -328,10 +482,7 @@ python prepare_data.py \
     --train-split 0.9 \
     --val-split 0.05 \
     --test-split 0.05 \
-    --lowercase \
-    --remove-urls \
-    --remove-emails \
-    --min-length 10
+    --min-line-length 10
 ```
 
 ---
@@ -341,7 +492,7 @@ python prepare_data.py \
 ### 1. Configuration Recommendation
 
 ```bash
-python recommend_config.py --data-dir ./data
+slim-recommend --data-dir ./data
 ```
 
 Analyzes your dataset and provides:
@@ -354,7 +505,7 @@ Analyzes your dataset and provides:
 ### 2. Model Diagnosis
 
 ```bash
-python diagnose.py \
+slim-diagnose \
     ./output/best_model.pt \
     ./data/tokenizer.model \
     ./data
@@ -374,7 +525,7 @@ Performs comprehensive checks:
 ### Interactive Mode
 
 ```bash
-python inference.py \
+slim-inference \
     --checkpoint model.pt \
     --tokenizer tokenizer.model
 ```
@@ -387,7 +538,7 @@ Commands:
 ### Batch Generation
 
 ```bash
-python inference.py \
+slim-inference \
     --checkpoint model.pt \
     --tokenizer tokenizer.model \
     --prompt "Praha je" \
@@ -488,7 +639,7 @@ Based on Chinchilla scaling and empirical results:
 
 **Diagnosis:**
 ```bash
-python diagnose.py model.pt tokenizer.model data/
+slim-diagnose model.pt tokenizer.model data/
 ```
 
 **Common causes:**
@@ -505,7 +656,7 @@ python diagnose.py model.pt tokenizer.model data/
 ### Out of Memory
 
 **Solutions:**
-1. Reduce batch size: `--batch-size 16` or `--batch-size 8`
+1. Reduce batch size: modify config file or use smaller batch
 2. Use smaller model: `slim_cz_v1_tiny.yaml`
 3. Reduce sequence length in config
 4. Use gradient accumulation
@@ -526,7 +677,7 @@ python diagnose.py model.pt tokenizer.model data/
 2. Use larger model if you have enough data
 3. Collect more training data (target 2-5M tokens)
 4. Adjust generation parameters (temperature, top_k)
-5. Check tokenizer quality with `diagnose.py`
+5. Check tokenizer quality with `slim-diagnose`
 
 ---
 
