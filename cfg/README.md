@@ -2,19 +2,19 @@
 
 **Slavic Linguistic integrated Micro-model for Czechia**
 
-This directory contains YAML configuration files for different model sizes, similar to the ultralytics approach.
+This directory contains YAML configuration files for different model sizes optimized for Czech language modeling with small datasets (2-5M tokens).
 
 ---
 
 ## 📋 Available Configurations
 
-| File | Model Size | Parameters | Memory | Use Case |
-|------|------------|------------|--------|----------|
-| `tiny.yaml` | Tiny | ~3M | ~12 MB | Testing, debugging |
-| `small.yaml` | Small | ~14M | ~56 MB | Development (default) |
-| `medium.yaml` | Medium | ~56M | ~224 MB | Production |
-| `large.yaml` | Large | ~125M | ~500 MB | High-end production |
-| `default.yaml` | Default | ~14M | ~56 MB | Same as small |
+| File | Model Size | Parameters | Memory | Dataset Size | Use Case |
+|------|------------|------------|--------|--------------|----------|
+| `slim_cz_v1_tiny.yaml` | Tiny | ~3.6M | ~14 MB | < 2M tokens | Testing, debugging, resource-constrained |
+| `slim_cz_v1_default.yaml` | Default | ~7.2M | ~29 MB | 2-5M tokens | Standard training (recommended) |
+| `slim_cz_v1_medium.yaml` | Medium | ~19.8M | ~79 MB | 5-15M tokens | Production, augmented data |
+
+**Note**: All configurations use weight tying to reduce parameters by ~30-40%. Memory estimates are for float32 precision.
 
 ---
 
@@ -23,36 +23,36 @@ This directory contains YAML configuration files for different model sizes, simi
 ### From Command Line
 
 ```bash
-# Use predefined config
-python train.py --data-dir ./data --config tiny
-python train.py --data-dir ./data --config small
-python train.py --data-dir ./data --config medium
-python train.py --data-dir ./data --config large
+# Use predefined config (recommended approach)
+python train.py --data-dir ./data --config slim_cz_v1_tiny.yaml
+python train.py --data-dir ./data --config slim_cz_v1_default.yaml
+python train.py --data-dir ./data --config slim_cz_v1_medium.yaml
 
-# Default (small) is used if no config specified
+# Default config is used if not specified
 python train.py --data-dir ./data
 ```
 
 ### From Python
 
 ```python
-from config_loader import load_config
+import yaml
+from model import SLiM_CZ_V1
 
 # Load config
-config = load_config('small')
+with open('slim_cz_v1_default.yaml') as f:
+    config = yaml.safe_load(f)
 
 # Access configuration
 vocab_size = config['model']['vocab_size']
 batch_size = config['train']['batch_size']
 
 # Create model
-from slim_cz_v1 import SLiM_CZ_V1
 model = SLiM_CZ_V1(**config['model'])
 ```
 
 ---
 
-## 📝 Configuration Structure
+## 📁 Configuration Structure
 
 Each YAML file contains four main sections:
 
@@ -60,34 +60,51 @@ Each YAML file contains four main sections:
 
 ```yaml
 model:
-  vocab_size: 10000      # Vocabulary size
+  vocab_size: 16000      # Vocabulary size (SentencePiece BPE)
   d_model: 256           # Embedding dimension
   num_heads: 8           # Number of attention heads
-  num_layers: 6          # Number of transformer layers
-  d_ff: 1024            # Feed-forward dimension
+  num_layers: 4          # Number of transformer layers
+  d_ff: 1024            # Feed-forward dimension (typically 4x d_model)
   max_seq_len: 512      # Maximum sequence length
-  dropout: 0.1          # Dropout rate
+  dropout: 0.25         # Dropout rate (higher for regularization)
+  weight_tying: true    # Tie input/output embeddings (saves ~30% params)
 ```
 
 ### 2. Training Parameters
 
 ```yaml
 train:
+  # Optimization
   batch_size: 32                # Training batch size
-  learning_rate: 0.0001        # Learning rate
-  weight_decay: 0.01           # Weight decay for regularization
-  epochs: 10                   # Number of training epochs
-  scheduler: "cosine"          # Learning rate scheduler
+  learning_rate: 0.0001        # Initial learning rate
+  weight_decay: 0.05           # L2 regularization (aggressive for small data)
+  betas: [0.9, 0.98]          # Adam optimizer betas
+  eps: 1.0e-9                 # Adam epsilon
+  
+  # Learning rate schedule
+  warmup_steps: 500            # Warmup steps
+  scheduler: cosine            # LR scheduler type
+  min_lr: 1.0e-6              # Minimum learning rate
+  
+  # Regularization
   gradient_clip: 1.0           # Gradient clipping threshold
+  label_smoothing: 0.1         # Label smoothing (prevents overconfidence)
+  
+  # Training duration
+  epochs: 30                   # Number of training epochs
+  max_steps: 100000           # Maximum training steps
   
   # Logging & Checkpointing
-  log_every: 100              # Log every N steps
-  eval_every: 1000            # Evaluate every N steps
-  save_every: 5000            # Save checkpoint every N steps
+  log_every: 50               # Log every N steps
+  eval_every: 500             # Evaluate every N steps
+  save_every: 2000            # Save checkpoint every N steps
   
   # Early Stopping
-  patience: 5                 # Early stopping patience
-  min_delta: 0.001           # Minimum improvement delta
+  patience: 8                 # Early stopping patience
+  min_delta: 0.0005          # Minimum improvement delta
+  
+  # Optional monitoring
+  use_tensorboard: false      # Enable TensorBoard logging
 ```
 
 ### 3. Generation Parameters
@@ -95,22 +112,25 @@ train:
 ```yaml
 generation:
   max_new_tokens: 100         # Maximum tokens to generate
-  temperature: 0.8            # Sampling temperature
+  temperature: 0.8            # Sampling temperature (lower = more focused)
   top_k: 50                   # Top-k sampling
   top_p: 0.95                # Nucleus (top-p) sampling
   repetition_penalty: 1.2    # Repetition penalty
-  do_sample: true            # Use sampling (vs greedy)
+  do_sample: true            # Use sampling (vs greedy decoding)
 ```
 
 ### 4. Data Configuration
 
 ```yaml
 data:
+  # Dataset splits
   train_split: 0.90          # Training data ratio
   val_split: 0.05            # Validation data ratio
   test_split: 0.05           # Test data ratio
-  seq_len: 512              # Sequence length
-  stride: 256               # Stride for sequence creation
+  
+  # Sequence configuration
+  seq_len: 512              # Sequence length for training
+  stride: 256               # Stride for overlapping sequences
   
   # Text Processing
   lowercase: false           # Convert to lowercase
@@ -128,50 +148,68 @@ data:
 
 ```bash
 # Copy existing config
-cp cfg/small.yaml cfg/my_config.yaml
+cp slim_cz_v1_default.yaml my_config.yaml
 
 # Edit with your parameters
-nano cfg/my_config.yaml
+nano my_config.yaml
 
 # Use it
-python train.py --data-dir ./data --config cfg/my_config.yaml
+python train.py --data-dir ./data --config my_config.yaml
 ```
 
 ### Option 2: Create from Scratch
 
 ```yaml
-# cfg/custom.yaml
+# my_config.yaml
 model:
   vocab_size: 20000
-  d_model: 384
+  d_model: 320
   num_heads: 8
-  num_layers: 8
-  d_ff: 1536
-  max_seq_len: 1024
-  dropout: 0.1
+  num_layers: 5
+  d_ff: 1280
+  max_seq_len: 512
+  dropout: 0.2
+  weight_tying: true
 
 train:
-  batch_size: 24
+  batch_size: 32
   learning_rate: 0.00008
-  epochs: 15
-  scheduler: "cosine"
+  weight_decay: 0.03
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  warmup_steps: 500
+  scheduler: cosine
+  min_lr: 1.0e-6
   gradient_clip: 1.0
+  label_smoothing: 0.1
+  epochs: 30
+  max_steps: 100000
+  log_every: 50
+  eval_every: 500
+  save_every: 2000
+  patience: 8
+  min_delta: 0.0005
+  use_tensorboard: false
 
 generation:
-  max_new_tokens: 150
+  max_new_tokens: 100
   temperature: 0.8
   top_k: 50
+  top_p: 0.95
+  repetition_penalty: 1.2
+  do_sample: true
 
 data:
   train_split: 0.90
   val_split: 0.05
   test_split: 0.05
-  seq_len: 1024
-  stride: 512
-
-info:
-  name: "SLiM-CZ-V1-Custom"
-  description: "My custom configuration"
+  seq_len: 512
+  stride: 256
+  lowercase: false
+  remove_urls: true
+  remove_emails: true
+  min_line_length: 10
+  min_frequency: 2
 ```
 
 ---
@@ -180,104 +218,196 @@ info:
 
 ### Model Size Guidelines
 
-**Tiny** - Use when:
+**Tiny** (`slim_cz_v1_tiny.yaml`) - Use when:
+- Dataset < 2M tokens
 - Testing code changes
 - Debugging training pipeline
 - Quick experiments
-- Limited GPU memory
+- Limited GPU memory (< 4GB)
+- Fast iteration needed
 
-**Small** - Use when:
+**Default** (`slim_cz_v1_default.yaml`) - Use when:
+- Dataset 2-5M tokens (recommended)
 - Starting development
-- Learning the system
-- Medium-sized datasets
+- Standard Czech text generation
 - 4-8GB GPU memory
+- Balanced quality/speed
 
-**Medium** - Use when:
+**Medium** (`slim_cz_v1_medium.yaml`) - Use when:
+- Dataset 5-15M tokens
+- After data augmentation
 - Production deployment
-- Large datasets
-- Quality is important
-- 12-16GB GPU memory
+- Higher quality needed
+- 8-16GB GPU memory
 
-**Large** - Use when:
-- Research projects
-- Maximum quality needed
-- Very large datasets
-- 24GB+ GPU memory
+### Chinchilla Scaling Laws
+
+The configurations follow Chinchilla scaling recommendations:
+- **Rule of thumb**: ~100-150k parameters per 1M tokens
+- **Tiny**: 3.6M params → optimal for 1-2M tokens
+- **Default**: 7.2M params → optimal for 2-5M tokens
+- **Medium**: 19.8M params → optimal for 5-15M tokens
 
 ### Parameter Relationships
 
 **d_model and num_heads:**
-- d_model must be divisible by num_heads
-- Each head gets d_model / num_heads dimensions
+- `d_model` must be divisible by `num_heads`
+- Each head gets `d_model / num_heads` dimensions
+- Standard: 8 heads, 256 dimensions = 32 dim/head
 
 **d_ff (Feed-Forward):**
-- Typically 4x d_model
+- Typically 4x `d_model`
 - Can range from 2x to 8x
+- Larger = more capacity but slower
 
 **seq_len and stride:**
-- stride = seq_len / 2 is common
-- Smaller stride = more sequences
-- Larger stride = faster processing
+- `stride = seq_len / 2` is common (50% overlap)
+- Smaller stride = more sequences (slower, more data)
+- Larger stride = fewer sequences (faster, less data)
 
 **batch_size and GPU memory:**
-- Larger model → smaller batch size
-- Longer sequences → smaller batch size
-- More memory → larger batch size
+- Larger model → smaller batch size needed
+- Longer sequences → smaller batch size needed
+- Rule of thumb: batch_size ∝ 1 / (params × seq_len)
+
+**dropout and regularization:**
+- Small data → higher dropout (0.25-0.3)
+- Large data → lower dropout (0.1-0.15)
+- weight_decay should be higher for small datasets
 
 ---
 
 ## 🎯 Recommended Configurations
 
-### For Learning
+### For Learning / Testing
 
-```yaml
-# Use tiny or small
-python train.py --data-dir ./data --config tiny --epochs 5
+```bash
+# Quick test with tiny model
+python train.py --data-dir ./data --config slim_cz_v1_tiny.yaml --epochs 5
 ```
 
 ### For Development
 
-```yaml
-# Use small with overrides
-python train.py --data-dir ./data --config small --epochs 10
+```bash
+# Standard development with default config
+python train.py --data-dir ./data --config slim_cz_v1_default.yaml --epochs 30
 ```
 
 ### For Production
 
-```yaml
-# Use medium or large
-python train.py --data-dir ./data --config medium --epochs 30
+```bash
+# Production with medium model (requires more data)
+python train.py --data-dir ./data --config slim_cz_v1_medium.yaml --epochs 25
 ```
 
 ---
 
 ## 📊 Configuration Comparison
 
-| Parameter | Tiny | Small | Medium | Large |
-|-----------|------|-------|--------|-------|
-| **vocab_size** | 10k | 10k | 30k | 50k |
-| **d_model** | 128 | 256 | 512 | 768 |
-| **num_heads** | 4 | 8 | 8 | 12 |
-| **num_layers** | 4 | 6 | 8 | 12 |
-| **d_ff** | 512 | 1024 | 2048 | 3072 |
-| **max_seq_len** | 256 | 512 | 1024 | 2048 |
-| **batch_size** | 64 | 32 | 16 | 8 |
-| **epochs** | 5 | 10 | 20 | 30 |
+| Parameter | Tiny | Default | Medium |
+|-----------|------|---------|--------|
+| **vocab_size** | 12,000 | 16,000 | 24,000 |
+| **d_model** | 192 | 256 | 384 |
+| **num_heads** | 6 | 8 | 8 |
+| **num_layers** | 3 | 4 | 6 |
+| **d_ff** | 768 | 1024 | 1536 |
+| **max_seq_len** | 256 | 512 | 512 |
+| **dropout** | 0.3 | 0.25 | 0.2 |
+| **Parameters** | 3.6M | 7.2M | 19.8M |
+| **batch_size** | 64 | 32 | 32 |
+| **learning_rate** | 3e-4 | 1e-4 | 5e-5 |
+| **epochs** | 40 | 30 | 25 |
+| **weight_decay** | 0.1 | 0.05 | 0.03 |
+| **Recommended Data** | < 2M tokens | 2-5M tokens | 5-15M tokens |
 
 ---
 
-## 🔍 Viewing Configurations
+## 🔬 Research Optimizations Applied
+
+All configurations implement research-backed optimizations for small datasets:
+
+1. **Weight Tying**: Saves ~30-40% parameters without quality loss
+2. **Enhanced Dropout**: Higher rates (0.2-0.3) prevent overfitting on small data
+3. **Aggressive Weight Decay**: L2 regularization (0.03-0.1) for better generalization
+4. **Label Smoothing**: (0.1-0.15) prevents overconfidence on limited data
+5. **Extended Training**: More epochs (25-40) to fully utilize small datasets
+6. **SentencePiece BPE**: Optimized for Czech morphology
+7. **Chinchilla Scaling**: Parameter count matched to dataset size
+
+---
+
+## 🛠️ Diagnostic Tools
+
+### Check Configuration
 
 ```bash
-# View all available configs
-python config_loader.py
-
-# Load and display specific config
+# View configuration
 python -c "
-from config_loader import load_config, ConfigLoader
-
-loader = ConfigLoader()
-config = load_config('small')
-loader.print_config(config)
+import yaml
+with open('slim_cz_v1_default.yaml') as f:
+    config = yaml.safe_load(f)
+    print(yaml.dump(config, default_flow_style=False))
 "
 ```
+
+### Calculate Parameters
+
+```bash
+# Calculate exact parameter count
+python -c "
+import yaml
+with open('slim_cz_v1_default.yaml') as f:
+    cfg = yaml.safe_load(f)['model']
+    
+vocab_emb = cfg['vocab_size'] * cfg['d_model']
+per_layer = (cfg['d_model'] * cfg['d_model'] * 4 + 
+             cfg['d_model'] * cfg['d_ff'] * 2 + 
+             cfg['d_model'] * 4)
+total = vocab_emb + per_layer * cfg['num_layers'] + cfg['d_model'] * 2
+print(f'Parameters: {total:,} (~{total/1e6:.1f}M)')
+"
+```
+
+### Diagnose Model
+
+```bash
+# Run full diagnostic
+python diagnose.py output/best_model.pt data/tokenizer.model data/
+```
+
+---
+
+## 📝 Notes
+
+- **Default is recommended** for most Czech language modeling tasks with 2-5M tokens
+- **Tiny** is best for experimentation and testing with limited data/compute
+- **Medium** requires augmented data (back-translation, synthesis) to reach its potential
+- All configs use **weight tying** - do not disable unless you have a specific reason
+- For datasets > 15M tokens, consider creating a custom larger configuration
+
+---
+
+## 🆘 Common Issues
+
+### Out of Memory
+
+```bash
+# Reduce batch size or use smaller model
+python train.py --config slim_cz_v1_tiny.yaml
+# or
+python train.py --config slim_cz_v1_default.yaml  # but edit batch_size to 16
+```
+
+### Overfitting
+
+- Increase dropout (0.3-0.4)
+- Increase weight_decay (0.1-0.2)
+- Use smaller model (tiny instead of default)
+- Add more training data
+
+### Poor Quality
+
+- Train longer (50+ epochs)
+- Use larger model (medium instead of default)
+- Collect more data (target 2-5M tokens)
+- Check tokenizer quality with `diagnose.py`
