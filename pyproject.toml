@@ -35,6 +35,7 @@ dependencies = [
     "numpy>=1.21.0",
     "pyyaml>=6.0.0",
     "sentencepiece>=0.1.99",
+    "pymupdf>=1.23.0",
 ]
 
 [project.optional-dependencies]
