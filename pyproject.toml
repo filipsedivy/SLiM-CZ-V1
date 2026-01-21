@@ -36,6 +36,7 @@ dependencies = [
     "pyyaml>=6.0.0",
     "sentencepiece>=0.1.99",
     "pymupdf>=1.23.0",
+    "chardet>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -65,9 +66,11 @@ all = [
 
 # CLI entry points
 [project.scripts]
+slim-prepare-data = "slim_cz_v1.cli.prepare_data:main"
+slim-extract-text = "slim_cz_v1.cli.extract_text:main"
+slim-train-tokenizer = "slim_cz_v1.cli.train_tokenizer:main"
 slim-train = "slim_cz_v1.train:main"
 slim-inference = "slim_cz_v1.inference:main"
-slim-prepare-data = "slim_cz_v1.prepare_data:main"
 slim-recommend = "slim_cz_v1.recommend_config:main"
 slim-diagnose = "slim_cz_v1.diagnose:main"
 
