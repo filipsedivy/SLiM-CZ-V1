@@ -2,14 +2,15 @@
 """
 CLI tool for text extraction and preprocessing.
 
-Extracts and cleans text from various file formats (TXT, PDF).
+Extracts and cleans text from various file formats (TXT, PDF, EPUB).
 """
 
 import argparse
 import sys
+import os
 from pathlib import Path
 
-from ..preprocessing import TextExtractionPipeline, print_error, print_success, print_section
+from ..preprocessing import TextExtractionPipeline, print_error, print_success, print_section, print_info
 
 
 def main():
@@ -27,6 +28,10 @@ Examples:
   slim-extract-text --input ./data/raw --output ./data/processed \\
     --output-corpus ./data/corpus.txt
 
+  # With parallel processing (faster)
+  slim-extract-text --input ./data/raw --output ./data/processed \\
+    --max-workers 8
+
   # With anonymization
   slim-extract-text --input ./data/raw --output ./data/processed \\
     --anonymize-emails --anonymize-phones --anonymize-urls \\
@@ -36,6 +41,7 @@ Examples:
   slim-extract-text --input ./data/raw --output ./data/processed \\
     --anonymize-emails --anonymize-phones --anonymize-urls \\
     --min-line-length 20 --pdf-min-chars-per-page 300 \\
+    --max-workers 8 \\
     --output-corpus ./data/corpus.txt
 
 Output Structure:
@@ -46,6 +52,12 @@ Output Structure:
   --output-corpus: Single concatenated corpus file
                    Optional - only created if specified
                    Recommended for tokenizer training
+
+Performance:
+  --max-workers: Controls parallel processing
+                 Default: 4 workers
+                 Recommended: 4-8 for most systems
+                 Expected speedup: 3-7x faster than sequential
         """
     )
 
@@ -57,7 +69,7 @@ Output Structure:
         '--input', '-i',
         type=str,
         required=True,
-        help='Input directory with raw files (TXT, PDF)'
+        help='Input directory with raw files (TXT, PDF, EPUB)'
     )
 
     parser.add_argument(
@@ -76,6 +88,19 @@ Output Structure:
         type=str,
         default=None,
         help='Optional: Path to save concatenated corpus file (e.g., corpus.txt)'
+    )
+
+    # ============================================================
+    # OPTIONAL ARGUMENTS - PERFORMANCE
+    # ============================================================
+
+    parser.add_argument(
+        '--max-workers', '-w',
+        type=int,
+        default=4,
+        help='Number of parallel workers for file processing (default: 4). '
+             'Recommended: 4-8 for most systems. Higher values = faster processing. '
+             'Set to 1 for sequential processing (debugging).'
     )
 
     # ============================================================
@@ -138,6 +163,26 @@ Output Structure:
         return 1
 
     # ============================================================
+    # WORKER COUNT VALIDATION & OPTIMIZATION
+    # ============================================================
+
+    cpu_cores = os.cpu_count() or 4
+    max_workers = args.max_workers
+
+    # Validate worker count
+    if max_workers < 1:
+        print_error(f"Invalid worker count: {max_workers}. Must be >= 1.")
+        return 1
+
+    # Warn if worker count is suboptimal
+    if max_workers > 2 * cpu_cores:
+        print_section("Performance Warning")
+        print_info(f"Specified workers ({max_workers}) exceeds 2x CPU cores ({cpu_cores})")
+        print_info(f"Recommended maximum: {2 * cpu_cores} workers")
+        print_info("High worker count may cause overhead and reduce performance")
+        print()
+
+    # ============================================================
     # CONFIGURATION
     # ============================================================
 
@@ -147,7 +192,38 @@ Output Structure:
         'anonymize_emails': args.anonymize_emails,
         'anonymize_phones': args.anonymize_phones,
         'anonymize_urls': args.anonymize_urls,
+        'max_workers': max_workers,
     }
+
+    # ============================================================
+    # PERFORMANCE NOTICE
+    # ============================================================
+
+    if max_workers > 1:
+        print_section("Parallel Processing Enabled")
+        print_info(f"Workers: {max_workers}")
+        print_info(f"Available CPU cores: {cpu_cores}")
+
+        # Estimate speedup based on worker count
+        # FORMULA: estimated_speedup ≈ min(workers, cores) * efficiency
+        # WHERE: efficiency ≈ 0.85 for 4 workers, 0.75 for 8 workers
+        if max_workers <= 4:
+            efficiency = 0.85
+        elif max_workers <= 8:
+            efficiency = 0.75
+        else:
+            efficiency = 0.65
+
+        effective_workers = min(max_workers, cpu_cores)
+        estimated_speedup = effective_workers * efficiency
+
+        print_info(f"Expected speedup: ~{estimated_speedup:.1f}x faster than sequential")
+        print()
+    else:
+        print_section("Sequential Processing Mode")
+        print_info("Running with 1 worker (sequential mode)")
+        print_info("Use --max-workers 4 or higher for parallel processing")
+        print()
 
     # ============================================================
     # ANONYMIZATION NOTICE

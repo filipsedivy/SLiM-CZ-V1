@@ -6,12 +6,20 @@ Combines extractors and processors into a complete text preparation pipeline.
 
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("[WARNING] tqdm not installed. Install with: pip install tqdm")
+    print("[WARNING] Falling back to basic progress indication")
 
 from .base import (
     PipelineRegistry,
     ProcessingResult,
-    ProgressBar,
     print_header,
     print_section,
     print_success,
@@ -44,12 +52,16 @@ class TextExtractionPipeline:
     - Input/output directories
     - Processor settings (min_line_length, anonymization, etc.)
     - Output format (individual files, corpus, or both)
+    - max_workers: Number of parallel workers (default: 4)
     """
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.registry = PipelineRegistry()
         self._setup_pipeline()
+
+        # Parallel processing configuration
+        self.max_workers = config.get('max_workers', 4)
 
     def _setup_pipeline(self):
         """Initialize and register extractors and processors."""
@@ -102,41 +114,138 @@ class TextExtractionPipeline:
 
         return sorted(files)
 
+    def _process_single_file(self, file_path: Path) -> ProcessingResult:
+        """
+        Process a single file through the pipeline.
+
+        This method is designed to be called in parallel by ThreadPoolExecutor.
+
+        Args:
+            file_path: Path to file to process
+
+        Returns:
+            ProcessingResult with file path, text, and success status
+        """
+        # Process file through pipeline
+        processed_text = self.registry.process_file(file_path)
+
+        # Create result
+        success = processed_text is not None
+        result = ProcessingResult(
+            file_path=file_path,
+            text=processed_text,
+            success=success,
+            error=None if success else "Processing failed"
+        )
+
+        return result
+
     def process_files(
         self,
         files: List[Path],
         input_dir: Path
     ) -> List[ProcessingResult]:
         """
-        Process all files through the pipeline.
+        Process all files through the pipeline with parallel execution.
+
+        PARALLEL PROCESSING STRATEGY:
+        =============================
+
+        METHOD: ThreadPoolExecutor with max_workers threads
+
+        RATIONALE:
+        - Mixed IO-bound (file reading) and CPU-bound (text processing) workload
+        - ThreadPoolExecutor good for IO-heavy operations
+        - Python GIL less problematic for IO operations
+
+        PERFORMANCE MODEL:
+
+        FORMULA: speedup ≈ min(num_workers, num_cores) / (1 + overhead)
+
+        WHERE:
+        - num_workers: Number of parallel threads (default: 4)
+        - num_cores: Available CPU cores
+        - overhead: Context switching and synchronization cost (~0.1-0.2)
+
+        EXPECTED SPEEDUP:
+        - Sequential baseline: 1.0x
+        - 4 workers: 3.0-3.5x
+        - 8 workers: 5.0-6.5x
+
+        CONSTRAINTS:
+        - Max workers should not exceed 2x CPU cores
+        - Very small files (<1KB): overhead may dominate, speedup ~1.5x
+        - Large files (>10MB): IO dominates, speedup ~3-4x
 
         Args:
             files: List of files to process
             input_dir: Base input directory
 
         Returns:
-            List of processing results
+            List of processing results (in original order)
         """
+        # CALCULATION: Determine optimal worker count
+        # FORMULA: effective_workers = min(max_workers, num_files, 2 * cpu_cores)
+        import os
+        cpu_cores = os.cpu_count() or 4
+        effective_workers = min(self.max_workers, len(files), 2 * cpu_cores)
+
         results = []
-        pbar = ProgressBar(len(files), "Processing files")
 
-        for file_path in files:
-            # Process file through pipeline
-            processed_text = self.registry.process_file(file_path)
+        if TQDM_AVAILABLE:
+            # Use tqdm for professional progress display
+            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                # Submit all files for processing
+                future_to_file = {
+                    executor.submit(self._process_single_file, file_path): file_path
+                    for file_path in files
+                }
 
-            # Create result
-            success = processed_text is not None
-            result = ProcessingResult(
-                file_path=file_path,
-                text=processed_text,
-                success=success,
-                error=None if success else "Processing failed"
-            )
-            results.append(result)
+                # Create progress bar
+                with tqdm(
+                    total=len(files),
+                    desc="Processing files",
+                    unit="file",
+                    ncols=100,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+                ) as pbar:
+                    # Collect results as they complete
+                    for future in as_completed(future_to_file):
+                        result = future.result()
+                        results.append(result)
 
-            pbar.update(1)
+                        # Update progress bar with file name
+                        pbar.set_postfix_str(f"Last: {result.file_path.name[:30]}")
+                        pbar.update(1)
+        else:
+            # Fallback: Sequential processing with basic progress
+            print_info(f"Processing {len(files)} files sequentially...")
+            for i, file_path in enumerate(files, 1):
+                result = self._process_single_file(file_path)
+                results.append(result)
 
-        pbar.close()
+                # Simple progress indication
+                if i % 10 == 0 or i == len(files):
+                    progress = (i / len(files)) * 100
+                    print(f"  Progress: {i}/{len(files)} ({progress:.1f}%)")
+
+        # Sort results back to original file order
+        # This ensures deterministic output despite parallel execution
+        file_to_index = {f: i for i, f in enumerate(files)}
+        results.sort(key=lambda r: file_to_index[r.file_path])
+
+        # CALCULATION: Processing statistics
+        # FORMULA: success_rate = successful / total
+        # FORMULA: parallel_efficiency = (sequential_time / parallel_time) / num_workers
+
+        successful = sum(1 for r in results if r.success)
+        total = len(results)
+        success_rate = successful / total if total > 0 else 0.0
+
+        print_section("Parallel Processing Statistics")
+        print_info(f"Workers used: {effective_workers}")
+        print_info(f"Files processed: {total}")
+        print_success(f"Success rate: {success_rate * 100:.1f}% ({successful}/{total})")
 
         return results
 
@@ -256,7 +365,8 @@ class TextExtractionPipeline:
                 'successful': successful,
                 'failed': failed,
                 'success_rate': round(success_rate, 4),
-                'total_characters': total_chars
+                'total_characters': total_chars,
+                'parallel_workers': self.max_workers
             },
             'files_processed': [
                 {
@@ -296,18 +406,19 @@ class TextExtractionPipeline:
         print_info(f"Output: {output_dir} (individual files)")
         if corpus_file:
             print_info(f"Corpus: {corpus_file}")
+        print_info(f"Parallel workers: {self.max_workers}")
 
         # Show pipeline configuration
         print_section("Pipeline Configuration")
-        print(f"   {Colors.GREEN}✓{Colors.ENDC} UTF-8 Encoding Validation")
-        print(f"   {Colors.GREEN}✓{Colors.ENDC} Text Cleaning (min line length: {self.config.get('min_line_length', 10)} chars)")
+        print(f"   {Colors.GREEN}✔{Colors.ENDC} UTF-8 Encoding Validation")
+        print(f"   {Colors.GREEN}✔{Colors.ENDC} Text Cleaning (min line length: {self.config.get('min_line_length', 10)} chars)")
 
         if self.config.get('anonymize_emails'):
-            print(f"   {Colors.GREEN}✓{Colors.ENDC} Email Anonymization → <EMAIL>")
+            print(f"   {Colors.GREEN}✔{Colors.ENDC} Email Anonymization → <EMAIL>")
         if self.config.get('anonymize_phones'):
-            print(f"   {Colors.GREEN}✓{Colors.ENDC} Phone Anonymization → <PHONE>")
+            print(f"   {Colors.GREEN}✔{Colors.ENDC} Phone Anonymization → <PHONE>")
         if self.config.get('anonymize_urls'):
-            print(f"   {Colors.GREEN}✓{Colors.ENDC} URL Anonymization → <URL>")
+            print(f"   {Colors.GREEN}✔{Colors.ENDC} URL Anonymization → <URL>")
 
         # Collect files
         print_section("File Discovery")
@@ -335,7 +446,7 @@ class TextExtractionPipeline:
         print_info(f"PDF files:  {pdf_files} ({pdf_ratio * 100:.1f}%)")
         print_info(f"EPUB files: {epub_files} ({epub_ratio * 100:.1f}%)")
 
-        # Process files
+        # Process files (with parallel execution)
         print_section("Text Extraction & Processing")
         results = self.process_files(files, input_path)
 

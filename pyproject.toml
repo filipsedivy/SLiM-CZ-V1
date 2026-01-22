@@ -37,6 +37,7 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "pymupdf>=1.23.0",
     "chardet>=5.0.0",
+    "ebooklib>=0.18",
 ]
 
 [project.optional-dependencies]
