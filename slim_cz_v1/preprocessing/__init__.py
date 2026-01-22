@@ -16,7 +16,7 @@ from .base import (
     print_warning,
     print_error,
 )
-from .extractors import TxtExtractor, PdfExtractor
+from .extractors import TxtExtractor, PdfExtractor, EpubExtractor
 from .processors import (
     EncodingProcessor,
     CleaningProcessor,
@@ -32,10 +32,11 @@ __all__ = [
     'BaseProcessor',
     'PipelineRegistry',
     'ProcessingResult',
-    
+
     # Extractors
     'TxtExtractor',
     'PdfExtractor',
+    'EpubExtractor',
     
     # Processors
     'EncodingProcessor',

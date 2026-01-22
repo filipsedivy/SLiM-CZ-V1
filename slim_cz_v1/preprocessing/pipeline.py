@@ -20,7 +20,7 @@ from .base import (
     print_error,
     Colors
 )
-from .extractors import TxtExtractor, PdfExtractor
+from .extractors import TxtExtractor, PdfExtractor, EpubExtractor
 from .processors import (
     EncodingProcessor,
     CleaningProcessor,
@@ -31,15 +31,15 @@ from .processors import (
 class TextExtractionPipeline:
     """
     Complete text extraction and preprocessing pipeline.
-    
+
     Pipeline stages:
     1. File Discovery - Scan input directory
-    2. Extraction - Extract text from files (TXT, PDF)
+    2. Extraction - Extract text from files (TXT, PDF, EPUB)
     3. Encoding - Ensure UTF-8 encoding
     4. Cleaning - Normalize whitespace, filter short lines
     5. Anonymization - Replace sensitive data with tokens (optional)
     6. Output - Save processed texts
-    
+
     Configuration:
     - Input/output directories
     - Processor settings (min_line_length, anonymization, etc.)
@@ -62,6 +62,12 @@ class TextExtractionPipeline:
             self.registry.register_extractor(PdfExtractor(self.config))
         except ImportError:
             print_warning("PDF extraction disabled (PyMuPDF not installed)")
+
+        # Only register EPUB extractor if ebooklib is available
+        try:
+            self.registry.register_extractor(EpubExtractor(self.config))
+        except ImportError:
+            print_warning("EPUB extraction disabled (ebooklib not installed)")
 
         # Register processors in order
         # ORDER MATTERS: encoding → cleaning → anonymization
@@ -88,7 +94,7 @@ class TextExtractionPipeline:
         Returns:
             List of file paths to process
         """
-        supported_extensions = {'.txt', '.pdf'}
+        supported_extensions = {'.txt', '.pdf', '.epub'}
         files = []
 
         for ext in supported_extensions:
@@ -314,16 +320,20 @@ class TextExtractionPipeline:
         # CALCULATION: File type distribution
         # FORMULA: txt_ratio = txt_files / total_files
         # FORMULA: pdf_ratio = pdf_files / total_files
+        # FORMULA: epub_ratio = epub_files / total_files
 
         total_files = len(files)
         txt_files = sum(1 for f in files if f.suffix == '.txt')
         pdf_files = sum(1 for f in files if f.suffix == '.pdf')
+        epub_files = sum(1 for f in files if f.suffix == '.epub')
         txt_ratio = txt_files / total_files if total_files > 0 else 0.0
         pdf_ratio = pdf_files / total_files if total_files > 0 else 0.0
+        epub_ratio = epub_files / total_files if total_files > 0 else 0.0
 
         print_success(f"Found {total_files} files")
-        print_info(f"TXT files: {txt_files} ({txt_ratio * 100:.1f}%)")
-        print_info(f"PDF files: {pdf_files} ({pdf_ratio * 100:.1f}%)")
+        print_info(f"TXT files:  {txt_files} ({txt_ratio * 100:.1f}%)")
+        print_info(f"PDF files:  {pdf_files} ({pdf_ratio * 100:.1f}%)")
+        print_info(f"EPUB files: {epub_files} ({epub_ratio * 100:.1f}%)")
 
         # Process files
         print_section("Text Extraction & Processing")
