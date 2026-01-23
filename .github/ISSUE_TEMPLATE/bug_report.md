@@ -1,7 +1,6 @@
 ---
 name: Bug Report
 about: Report a bug or issue with SLiM-CZ-V1
-title: '[BUG] '
 labels: ['bug']
 assignees: []
 
