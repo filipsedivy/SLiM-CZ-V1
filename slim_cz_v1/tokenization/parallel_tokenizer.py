@@ -966,8 +966,527 @@ class ParallelTokenizer:
 
 
 # ============================================================================
+# SHARD PROCESSOR
+# ============================================================================
+
+class ShardProcessor:
+    """
+    Process multiple shard files in parallel.
+
+    This is more efficient than single-file processing for pre-sharded data:
+    - No scanning phase needed (each shard = one unit of work)
+    - Natural checkpoint granularity
+    - Can output per-shard or merged
+    - Trivially parallelizable across machines
+
+    Usage:
+        processor = ShardProcessor(
+            model_path=Path("tokenizer.model"),
+            num_workers=16
+        )
+
+        # Process directory of shards
+        stats = processor.process_shards(
+            input_pattern="./shards/shard-*.txt",
+            output_dir=Path("./tokens/")
+        )
+
+        # Or merge into single output
+        stats = processor.process_shards(
+            input_pattern="./shards/shard-*.txt",
+            output_path=Path("./tokens.txt"),
+            merge_output=True
+        )
+    """
+
+    def __init__(
+        self,
+        model_path: Path,
+        num_workers: Optional[int] = None,
+        quiet: bool = False,
+        debug: bool = False,
+        log_file: Optional[Path] = None,
+        checkpoint_dir: Optional[Path] = None
+    ):
+        """
+        Initialize shard processor.
+
+        Args:
+            model_path: Path to SentencePiece .model file
+            num_workers: Number of worker processes (default: CPU count - 1)
+            quiet: Suppress console output
+            debug: Enable debug logging
+            log_file: Path to log file
+            checkpoint_dir: Directory for checkpoints (enables resume)
+        """
+        if not SENTENCEPIECE_AVAILABLE:
+            raise ImportError("SentencePiece required: pip install sentencepiece")
+
+        self.model_path = Path(model_path).resolve()
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"Model not found: {self.model_path}")
+
+        # Validate model
+        try:
+            sp = spm.SentencePieceProcessor()
+            sp.Load(str(self.model_path))
+            self.vocab_size = sp.GetPieceSize()
+        except Exception as e:
+            raise ValueError(f"Failed to load model: {e}")
+
+        # Workers
+        if num_workers is None:
+            self.num_workers = max(1, mp.cpu_count() - 1)
+        else:
+            self.num_workers = max(1, num_workers)
+
+        # Logging
+        log_level = logging.DEBUG if debug else logging.INFO
+        self.logger = TokenizerLogger(
+            level=log_level,
+            log_file=log_file,
+            quiet=quiet
+        )
+        self.quiet = quiet
+        self.debug = debug
+
+        # Checkpointing
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+
+        self._interrupted = False
+
+    def discover_shards(self, input_pattern: str) -> List[Path]:
+        """
+        Discover shard files matching pattern.
+
+        Args:
+            input_pattern: Glob pattern (e.g., "./shards/shard-*.txt")
+                          or directory path
+
+        Returns:
+            Sorted list of shard file paths
+        """
+        import glob
+
+        pattern_path = Path(input_pattern)
+
+        # If it's a directory, find all .txt files
+        if pattern_path.is_dir():
+            files = list(pattern_path.glob("*.txt"))
+        else:
+            # Use glob pattern
+            files = [Path(f) for f in glob.glob(input_pattern)]
+
+        # Sort naturally (shard-1, shard-2, ..., shard-10, not shard-1, shard-10, shard-2)
+        def natural_sort_key(path: Path) -> List:
+            import re
+            parts = re.split(r'(\d+)', path.name)
+            return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+        files = sorted(files, key=natural_sort_key)
+
+        return files
+
+    def process_shards(
+        self,
+        input_pattern: str,
+        output_dir: Optional[Path] = None,
+        output_path: Optional[Path] = None,
+        merge_output: bool = False,
+        show_progress: bool = True,
+        resume: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process shard files in parallel.
+
+        Args:
+            input_pattern: Glob pattern for shard files (e.g., "shards/*.txt")
+            output_dir: Directory for per-shard output files
+            output_path: Single output file (requires merge_output=True)
+            merge_output: Merge all shards into single output file
+            show_progress: Show progress updates
+            resume: Resume from checkpoint if available
+
+        Returns:
+            Statistics dictionary
+        """
+        # Validate arguments
+        if merge_output and not output_path:
+            raise ValueError("merge_output=True requires output_path")
+        if not merge_output and not output_dir:
+            raise ValueError("Need either output_dir or merge_output=True with output_path")
+
+        # Discover shards
+        shards = self.discover_shards(input_pattern)
+
+        if not shards:
+            raise FileNotFoundError(f"No shards found matching: {input_pattern}")
+
+        # Calculate total size
+        total_size = sum(s.stat().st_size for s in shards)
+
+        self.logger.section("Shard Processing")
+        self.logger.info(f"Pattern:       {input_pattern}")
+        self.logger.info(f"Shards found:  {len(shards)}")
+        self.logger.info(f"Total size:    {format_bytes(total_size)}")
+        self.logger.info(f"Workers:       {self.num_workers}")
+
+        if merge_output:
+            self.logger.info(f"Output:        {output_path} (merged)")
+        else:
+            self.logger.info(f"Output dir:    {output_dir}")
+
+        # Setup
+        start_time = time.time()
+        temp_dir = Path(tempfile.mkdtemp(prefix='tokenizer_shards_'))
+
+        # Check checkpoint
+        completed_shards = set()
+        if resume and self.checkpoint_dir:
+            completed_shards = self._load_shard_checkpoint(shards)
+            if completed_shards:
+                self.logger.info(f"Resuming: {len(completed_shards)}/{len(shards)} shards complete")
+
+        # Filter shards to process
+        shards_to_process = [s for s in shards if s.name not in completed_shards]
+
+        try:
+            # Process shards
+            if shards_to_process:
+                self.logger.section("Processing Shards")
+
+                results = self._process_shards_parallel(
+                    shards=shards_to_process,
+                    temp_dir=temp_dir,
+                    output_dir=output_dir if not merge_output else None,
+                    show_progress=show_progress
+                )
+            else:
+                results = []
+                self.logger.info("All shards already processed")
+
+            # Merge if requested
+            if merge_output:
+                self.logger.section("Merging Output")
+                merge_stats = self._merge_shard_outputs(
+                    shards=shards,
+                    temp_dir=temp_dir,
+                    output_dir=output_dir,
+                    output_path=output_path,
+                    show_progress=show_progress
+                )
+            else:
+                merge_stats = {'total_lines': 0, 'total_tokens': 0}
+                for r in results:
+                    if not r.error:
+                        merge_stats['total_lines'] += r.num_lines
+                        merge_stats['total_tokens'] += r.num_tokens
+
+            # Calculate stats
+            wall_time = time.time() - start_time
+
+            stats = {
+                'total_shards': len(shards),
+                'processed_shards': len(shards_to_process),
+                'failed_shards': sum(1 for r in results if r.error),
+                'total_lines': merge_stats['total_lines'],
+                'total_tokens': merge_stats['total_tokens'],
+                'total_bytes': total_size,
+                'wall_time_seconds': wall_time,
+                'throughput_mb_per_second': (total_size / (1024*1024)) / wall_time if wall_time > 0 else 0,
+                'tokens_per_second': merge_stats['total_tokens'] / wall_time if wall_time > 0 else 0
+            }
+
+            # Report
+            self.logger.section("Complete")
+            self.logger.info(f"Shards:      {stats['total_shards']} ({stats['failed_shards']} failed)")
+            self.logger.info(f"Lines:       {stats['total_lines']:,}")
+            self.logger.info(f"Tokens:      {stats['total_tokens']:,}")
+            self.logger.info(f"Time:        {format_duration(wall_time)}")
+            self.logger.info(f"Throughput:  {stats['throughput_mb_per_second']:.2f} MB/s")
+
+            return stats
+
+        finally:
+            # Cleanup temp
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _process_shards_parallel(
+        self,
+        shards: List[Path],
+        temp_dir: Path,
+        output_dir: Optional[Path],
+        show_progress: bool
+    ) -> List[ChunkResult]:
+        """Process shards using worker pool."""
+
+        # Prepare arguments
+        worker_args = []
+        for i, shard in enumerate(shards):
+            if output_dir:
+                out_path = output_dir / f"{shard.stem}.tokens.txt"
+            else:
+                out_path = temp_dir / f"{shard.stem}.tokens.txt"
+
+            worker_args.append((
+                str(shard),
+                str(out_path),
+                str(self.model_path),
+                10000  # write buffer
+            ))
+
+        results = []
+        completed = 0
+        start_time = time.time()
+        last_progress = time.time()
+
+        # Create output dir if needed
+        if output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            ctx = mp.get_context('spawn')
+
+            with ctx.Pool(processes=self.num_workers) as pool:
+                for result in pool.imap_unordered(
+                    _process_shard_worker,
+                    worker_args,
+                    chunksize=1
+                ):
+                    results.append(result)
+                    completed += 1
+
+                    if self._interrupted:
+                        pool.terminate()
+                        break
+
+                    # Save checkpoint
+                    if self.checkpoint_dir and not result.error:
+                        self._save_shard_checkpoint(
+                            [r for r in results if not r.error]
+                        )
+
+                    # Progress
+                    if show_progress:
+                        now = time.time()
+                        if now - last_progress >= 0.5:
+                            elapsed = now - start_time
+                            eta = estimate_eta(completed, len(shards), elapsed)
+
+                            total_bytes = sum(r.input_bytes for r in results if not r.error)
+                            throughput = (total_bytes / (1024*1024)) / elapsed if elapsed > 0 else 0
+
+                            self.logger.progress(
+                                completed, len(shards),
+                                f"| {throughput:.1f} MB/s | ETA: {eta}"
+                            )
+                            last_progress = now
+
+            if show_progress:
+                self.logger.progress_done()
+
+        except Exception as e:
+            self.logger.error(f"Processing failed: {e}")
+            raise
+
+        return results
+
+    def _merge_shard_outputs(
+        self,
+        shards: List[Path],
+        temp_dir: Path,
+        output_dir: Optional[Path],
+        output_path: Path,
+        show_progress: bool
+    ) -> Dict[str, int]:
+        """Merge all shard outputs into single file."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        total_lines = 0
+        total_tokens = 0
+
+        with open(output_path, 'w', encoding='utf-8') as out_f:
+            for i, shard in enumerate(shards):
+                # Find the output file
+                if output_dir:
+                    shard_output = output_dir / f"{shard.stem}.tokens.txt"
+                else:
+                    shard_output = temp_dir / f"{shard.stem}.tokens.txt"
+
+                if not shard_output.exists():
+                    self.logger.warning(f"Missing output for {shard.name}")
+                    continue
+
+                # Stream copy
+                with open(shard_output, 'r', encoding='utf-8') as in_f:
+                    for line in in_f:
+                        out_f.write(line)
+                        total_lines += 1
+                        total_tokens += len(line.strip().split())
+
+                if show_progress and (i + 1) % 10 == 0:
+                    self.logger.progress(i + 1, len(shards), "")
+
+        if show_progress:
+            self.logger.progress_done()
+
+        self.logger.info(f"Merged {len(shards)} shards → {output_path}")
+
+        return {
+            'total_lines': total_lines,
+            'total_tokens': total_tokens
+        }
+
+    def _load_shard_checkpoint(self, shards: List[Path]) -> set:
+        """Load checkpoint for shard processing."""
+        if not self.checkpoint_dir:
+            return set()
+
+        cp_file = self.checkpoint_dir / "shard_checkpoint.json"
+        if not cp_file.exists():
+            return set()
+
+        try:
+            with open(cp_file, 'r') as f:
+                data = json.load(f)
+            return set(data.get('completed_shards', []))
+        except Exception as e:
+            self.logger.warning(f"Failed to load checkpoint: {e}")
+            return set()
+
+    def _save_shard_checkpoint(self, results: List[ChunkResult]):
+        """Save checkpoint for shard processing."""
+        if not self.checkpoint_dir:
+            return
+
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        cp_file = self.checkpoint_dir / "shard_checkpoint.json"
+
+        # Extract shard names from output paths
+        completed = []
+        for r in results:
+            if r.output_path:
+                name = Path(r.output_path).stem.replace('.tokens', '')
+                completed.append(name)
+
+        data = {
+            'completed_shards': completed,
+            'last_update': datetime.now().isoformat()
+        }
+
+        with open(cp_file, 'w') as f:
+            json.dump(data, f, indent=2)
+
+
+def _process_shard_worker(args: Tuple) -> ChunkResult:
+    """Worker function for processing a single shard file."""
+    input_path, output_path, model_path, write_buffer_size = args
+
+    start_time = time.time()
+    input_path = Path(input_path)
+
+    try:
+        # Load model
+        sp = spm.SentencePieceProcessor()
+        sp.Load(model_path)
+
+        # Process file
+        num_lines = 0
+        num_tokens = 0
+        write_buffer = []
+
+        with open(output_path, 'w', encoding='utf-8') as out_f:
+            with open(input_path, 'r', encoding='utf-8') as in_f:
+                for line in in_f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    token_ids = sp.EncodeAsIds(line)
+                    write_buffer.append(' '.join(map(str, token_ids)))
+                    num_lines += 1
+                    num_tokens += len(token_ids)
+
+                    if len(write_buffer) >= write_buffer_size:
+                        out_f.write('\n'.join(write_buffer) + '\n')
+                        write_buffer.clear()
+
+            if write_buffer:
+                out_f.write('\n'.join(write_buffer) + '\n')
+
+        return ChunkResult(
+            chunk_id=0,
+            output_path=output_path,
+            num_lines=num_lines,
+            num_tokens=num_tokens,
+            processing_time_sec=time.time() - start_time,
+            input_bytes=input_path.stat().st_size
+        )
+
+    except Exception as e:
+        return ChunkResult(
+            chunk_id=0,
+            output_path="",
+            num_lines=0,
+            num_tokens=0,
+            processing_time_sec=time.time() - start_time,
+            input_bytes=input_path.stat().st_size if input_path.exists() else 0,
+            error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+
+
+# ============================================================================
 # CONVENIENCE FUNCTION
 # ============================================================================
+
+def tokenize_shards_parallel(
+    input_pattern: str,
+    model_path: Path,
+    output_dir: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+    merge_output: bool = False,
+    num_workers: Optional[int] = None,
+    quiet: bool = False,
+    debug: bool = False,
+    log_file: Optional[Path] = None,
+    checkpoint_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """
+    Convenience function for parallel shard tokenization.
+
+    Args:
+        input_pattern: Glob pattern for shards (e.g., "shards/*.txt")
+        model_path: SentencePiece model file
+        output_dir: Directory for per-shard outputs
+        output_path: Single merged output file
+        merge_output: Merge all outputs into one file
+        num_workers: Worker processes (default: auto)
+        quiet: Suppress output
+        debug: Enable debug logging
+        log_file: Log file path
+        checkpoint_dir: Checkpoint directory
+
+    Returns:
+        Statistics dictionary
+    """
+    processor = ShardProcessor(
+        model_path=model_path,
+        num_workers=num_workers,
+        quiet=quiet,
+        debug=debug,
+        log_file=log_file,
+        checkpoint_dir=checkpoint_dir
+    )
+
+    return processor.process_shards(
+        input_pattern=input_pattern,
+        output_dir=output_dir,
+        output_path=output_path,
+        merge_output=merge_output,
+        show_progress=not quiet
+    )
+
 
 def tokenize_file_parallel(
     input_path: Path,

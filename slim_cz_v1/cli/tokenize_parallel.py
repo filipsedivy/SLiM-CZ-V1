@@ -24,7 +24,7 @@ import sys
 import multiprocessing as mp
 from pathlib import Path
 
-from ..tokenization.parallel_tokenizer import ParallelTokenizer
+from ..tokenization.parallel_tokenizer import ParallelTokenizer, ShardProcessor
 from ..preprocessing.base import (
     print_error,
     print_success,
@@ -64,60 +64,63 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic parallel tokenization (auto-detects CPU cores)
+  # Single file tokenization
   slim-tokenize-parallel --input ./data/corpus.txt \\
-    --model ./models/tokenizer/tokenizer.model \\
+    --model ./models/tokenizer.model \\
     --output ./data/tokens.txt
 
-  # With checkpointing for TB-scale files (can resume after crash)
-  slim-tokenize-parallel --input ./data/corpus.txt \\
-    --model ./models/tokenizer/tokenizer.model \\
-    --output ./data/tokens.txt \\
-    --checkpoint-dir ./checkpoints
+  # Process shards (recommended for large datasets)
+  slim-tokenize-parallel --shards "./shards/shard-*.txt" \\
+    --model ./models/tokenizer.model \\
+    --output-dir ./tokens/
 
-  # Full configuration for maximum throughput
-  slim-tokenize-parallel --input ./data/corpus.txt \\
-    --model ./models/tokenizer/tokenizer.model \\
-    --output ./data/tokens.txt \\
+  # Process shards and merge into single file
+  slim-tokenize-parallel --shards "./shards/shard-*.txt" \\
+    --model ./models/tokenizer.model \\
+    --output ./tokens.txt \\
+    --merge
+
+  # Full configuration for TB-scale shard processing
+  slim-tokenize-parallel --shards "./shards/shard-*.txt" \\
+    --model ./models/tokenizer.model \\
+    --output-dir ./tokens/ \\
     --workers 32 \\
-    --chunk-size 100000 \\
-    --write-buffer 20000 \\
     --checkpoint-dir ./checkpoints \\
-    --log-file ./tokenization.log \\
-    --debug
+    --log-file tokenization.log
 
-  # Compress intermediate files (saves disk space for TB files)
-  slim-tokenize-parallel --input ./data/corpus.txt \\
-    --model ./models/tokenizer/tokenizer.model \\
-    --output ./data/tokens.txt \\
-    --compress-temp
+Shard Processing Benefits:
+  - No file scanning needed (each shard = one work unit)
+  - Natural checkpoint granularity (per-shard)
+  - Better I/O parallelism (multiple files)
+  - Can process across multiple machines
 
-Architecture:
-  - Streaming I/O: Constant memory regardless of file size
-  - Parallel workers: Each process handles independent chunks
-  - Checkpointing: Resume after crash without re-processing
-
-Memory Usage (approximate):
-  - Per worker: ~100-150 MB
-  - 16 workers: ~2 GB total
-  - 32 workers: ~4 GB total
-
-Recommended Settings by File Size:
-  - <10 GB:   --chunk-size 50000  --workers 8
+Recommended Settings by Total Size:
+  Single File Mode:
+  - <10 GB:    --chunk-size 50000  --workers 8
   - 10-100 GB: --chunk-size 100000 --workers 16
-  - 100+ GB:  --chunk-size 100000 --workers 32 --checkpoint-dir ./cp
-  - 1+ TB:    --chunk-size 200000 --workers 32 --checkpoint-dir ./cp --compress-temp
+  - 100+ GB:   --chunk-size 100000 --workers 32 --checkpoint-dir ./cp
+
+  Shard Mode (preferred for large data):
+  - Any size:  --shards "pattern" --workers N --checkpoint-dir ./cp
         """
     )
 
-    # Required arguments
-    parser.add_argument(
+    # Input mode (mutually exclusive: single file or shards)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+
+    input_group.add_argument(
         '--input', '-i',
         type=str,
-        required=True,
-        help='Input text file (raw text, one sentence per line)'
+        help='Input text file (single file mode)'
     )
 
+    input_group.add_argument(
+        '--shards', '-s',
+        type=str,
+        help='Glob pattern for shard files (e.g., "shards/shard-*.txt")'
+    )
+
+    # Required arguments
     parser.add_argument(
         '--model', '-m',
         type=str,
@@ -125,11 +128,23 @@ Recommended Settings by File Size:
         help='SentencePiece model file (.model from training)'
     )
 
+    # Output (different meaning for single vs shard mode)
     parser.add_argument(
         '--output', '-o',
         type=str,
-        required=True,
-        help='Output file for token IDs (space-separated integers)'
+        help='Output file (single file mode) or merged output (shard mode with --merge)'
+    )
+
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        help='Output directory for per-shard token files (shard mode only)'
+    )
+
+    parser.add_argument(
+        '--merge',
+        action='store_true',
+        help='Merge shard outputs into single file (shard mode only)'
     )
 
     # Performance tuning
@@ -197,37 +212,98 @@ Recommended Settings by File Size:
 
     args = parser.parse_args()
 
-    # Validate inputs
-    input_path = Path(args.input)
+    # Determine mode
+    shard_mode = args.shards is not None
+
+    # Validate paths
     model_path = Path(args.model)
-    output_path = Path(args.output)
     log_file = Path(args.log_file) if args.log_file else None
     checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else None
-
-    if not input_path.exists():
-        print_error(f"Input file not found: {args.input}")
-        return 1
 
     if not model_path.exists():
         print_error(f"Model file not found: {args.model}")
         return 1
 
-    # Create output directory if needed
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Mode-specific validation
+    if shard_mode:
+        # Shard mode validation
+        if args.merge:
+            if not args.output:
+                print_error("--merge requires --output for merged output file")
+                return 1
+            output_path = Path(args.output)
+            output_dir = None
+        else:
+            if not args.output_dir:
+                print_error("Shard mode requires --output-dir or --merge with --output")
+                return 1
+            output_dir = Path(args.output_dir)
+            output_path = None
+
+        # Discover shards for info display
+        import glob
+        pattern = args.shards
+        if Path(pattern).is_dir():
+            shard_files = list(Path(pattern).glob("*.txt"))
+        else:
+            shard_files = [Path(f) for f in glob.glob(pattern)]
+
+        if not shard_files:
+            print_error(f"No shard files found matching: {args.shards}")
+            return 1
+
+        total_size = sum(f.stat().st_size for f in shard_files)
+
+    else:
+        # Single file mode validation
+        if not args.output:
+            print_error("Single file mode requires --output")
+            return 1
+
+        input_path = Path(args.input)
+        output_path = Path(args.output)
+
+        if not input_path.exists():
+            print_error(f"Input file not found: {args.input}")
+            return 1
+
+        total_size = input_path.stat().st_size
+
+    # Create output directories
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    if shard_mode and output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Display configuration
     if not args.quiet:
         print_header("SLiM-CZ-V1 Parallel Batch Tokenization")
-        print_info("Industrial Grade - Streaming I/O for TB-scale files")
+
+        if shard_mode:
+            print_info("Mode: SHARD PROCESSING (recommended for large datasets)")
+        else:
+            print_info("Mode: Single File Processing")
         print()
 
         print_section("Input")
 
-        file_size = input_path.stat().st_size
-        print_info(f"File:      {input_path}")
-        print_info(f"Size:      {format_bytes(file_size)}")
+        if shard_mode:
+            print_info(f"Pattern:   {args.shards}")
+            print_info(f"Shards:    {len(shard_files)} files")
+            print_info(f"Total:     {format_bytes(total_size)}")
+        else:
+            print_info(f"File:      {input_path}")
+            print_info(f"Size:      {format_bytes(total_size)}")
+
         print_info(f"Model:     {model_path.name}")
-        print_info(f"Output:    {output_path}")
+
+        if shard_mode:
+            if args.merge:
+                print_info(f"Output:    {output_path} (merged)")
+            else:
+                print_info(f"Output:    {output_dir}/ (per-shard)")
+        else:
+            print_info(f"Output:    {output_path}")
 
         print()
         print_section("Configuration")
@@ -235,77 +311,113 @@ Recommended Settings by File Size:
         num_workers = args.workers or max(1, mp.cpu_count() - 1)
         print_info(f"CPU cores:       {mp.cpu_count()}")
         print_info(f"Workers:         {num_workers}")
-        print_info(f"Chunk size:      {args.chunk_size:,} lines")
-        print_info(f"Write buffer:    {args.write_buffer:,} lines")
-        print_info(f"Compress temp:   {args.compress_temp}")
+
+        if not shard_mode:
+            print_info(f"Chunk size:      {args.chunk_size:,} lines")
+            print_info(f"Write buffer:    {args.write_buffer:,} lines")
+            print_info(f"Compress temp:   {args.compress_temp}")
 
         if checkpoint_dir:
             print_info(f"Checkpoint dir:  {checkpoint_dir}")
             print_info(f"Resume enabled:  {not args.no_resume}")
 
-        # Memory estimate
-        memory_per_worker = 100 + (args.chunk_size * 0.002)  # MB estimate
-        total_memory = memory_per_worker * num_workers
+        # Estimates
         print()
+        memory_per_worker = 100  # MB estimate
+        total_memory = memory_per_worker * num_workers
         print_info(f"Est. memory:     {total_memory:.0f} MB peak")
 
-        # Time estimate
         throughput_estimate = 20.0 * num_workers * 0.85  # MB/s
-        time_estimate = (file_size / (1024 * 1024)) / throughput_estimate
+        time_estimate = (total_size / (1024 * 1024)) / throughput_estimate
         print_info(f"Est. time:       {format_duration(time_estimate)}")
 
         # Recommendations
-        file_size_gb = file_size / (1024 ** 3)
-        if file_size_gb > 100 and not checkpoint_dir:
+        total_size_gb = total_size / (1024 ** 3)
+        if total_size_gb > 100 and not checkpoint_dir:
             print()
-            print_warning(f"Large file ({file_size_gb:.0f} GB) without checkpointing!")
+            print_warning(f"Large dataset ({total_size_gb:.0f} GB) without checkpointing!")
             print_info("Recommend: --checkpoint-dir ./checkpoints")
-
-        if file_size_gb > 500 and args.chunk_size < 100000:
-            print()
-            print_warning("Consider larger chunk size for very large files")
-            print_info("Recommend: --chunk-size 100000 or --chunk-size 200000")
 
         print()
     else:
-        file_size = input_path.stat().st_size
-        print(f"[INFO] Tokenizing {input_path.name} ({format_bytes(file_size)})")
+        if shard_mode:
+            print(f"[INFO] Processing {len(shard_files)} shards ({format_bytes(total_size)})")
+        else:
+            print(f"[INFO] Tokenizing {input_path.name} ({format_bytes(total_size)})")
 
     # Run tokenization
     try:
-        tokenizer = ParallelTokenizer(
-            model_path=model_path,
-            num_workers=args.workers,
-            chunk_size=args.chunk_size,
-            write_buffer_size=args.write_buffer,
-            compress_temp=args.compress_temp,
-            quiet=args.quiet,
-            debug=args.debug,
-            log_file=log_file,
-            checkpoint_dir=checkpoint_dir
-        )
+        if shard_mode:
+            # SHARD MODE
+            processor = ShardProcessor(
+                model_path=model_path,
+                num_workers=args.workers,
+                quiet=args.quiet,
+                debug=args.debug,
+                log_file=log_file,
+                checkpoint_dir=checkpoint_dir
+            )
 
-        stats = tokenizer.tokenize_file(
-            input_path=input_path,
-            output_path=output_path,
-            resume=not args.no_resume,
-            show_progress=not args.quiet
-        )
+            stats = processor.process_shards(
+                input_pattern=args.shards,
+                output_dir=output_dir,
+                output_path=output_path if args.merge else None,
+                merge_output=args.merge,
+                show_progress=not args.quiet,
+                resume=not args.no_resume
+            )
+
+            # Normalize stats keys for common output
+            stats['wall_time_seconds'] = stats.get('wall_time_seconds', 0)
+            stats['throughput_mb_per_second'] = stats.get('throughput_mb_per_second', 0)
+            failed_key = 'failed_shards'
+
+        else:
+            # SINGLE FILE MODE
+            tokenizer = ParallelTokenizer(
+                model_path=model_path,
+                num_workers=args.workers,
+                chunk_size=args.chunk_size,
+                write_buffer_size=args.write_buffer,
+                compress_temp=args.compress_temp,
+                quiet=args.quiet,
+                debug=args.debug,
+                log_file=log_file,
+                checkpoint_dir=checkpoint_dir
+            )
+
+            stats = tokenizer.tokenize_file(
+                input_path=input_path,
+                output_path=output_path,
+                resume=not args.no_resume,
+                show_progress=not args.quiet
+            )
+            failed_key = 'failed_chunks'
 
         # Final summary
         if not args.quiet:
             print()
             print_header("Tokenization Completed Successfully")
             print()
-            print_success(f"Output: {output_path}")
+
+            if shard_mode:
+                if args.merge:
+                    print_success(f"Output: {output_path}")
+                else:
+                    print_success(f"Output: {output_dir}/")
+                print_info(f"Shards:       {stats.get('total_shards', 0)}")
+            else:
+                print_success(f"Output: {output_path}")
+
             print_info(f"Total tokens: {stats['total_tokens']:,}")
             print_info(f"Total lines:  {stats['total_lines']:,}")
             print_info(f"Throughput:   {stats['throughput_mb_per_second']:.2f} MB/s")
             print_info(f"Wall time:    {format_duration(stats['wall_time_seconds'])}")
 
-            if stats['failed_chunks'] > 0:
+            failed = stats.get(failed_key, 0)
+            if failed > 0:
                 print()
-                print_warning(f"Failed chunks: {stats['failed_chunks']}")
+                print_warning(f"Failed: {failed}")
                 if log_file:
                     print_info(f"Check {log_file} for details")
 
