@@ -71,7 +71,8 @@ class ParallelTokenizer:
             self,
             model_path: Path,
             num_workers: Optional[int] = None,
-            chunk_size: int = 10000  # lines per chunk
+            chunk_size: int = 10000,  # lines per chunk
+            quiet: bool = False
     ):
         """
         Initialize parallel tokenizer.
@@ -80,6 +81,7 @@ class ParallelTokenizer:
             model_path: Path to SentencePiece model
             num_workers: Number of worker processes (default: CPU count - 1)
             chunk_size: Number of lines per processing chunk
+            quiet: Suppress initialization output (useful for notebooks)
         """
         if not SENTENCEPIECE_AVAILABLE:
             raise ImportError("SentencePiece required: pip install sentencepiece")
@@ -96,13 +98,15 @@ class ParallelTokenizer:
 
         self.num_workers = num_workers
         self.chunk_size = chunk_size
+        self.quiet = quiet
 
-        print(f"[INFO] Parallel Tokenizer Configuration")
-        print(f"   CPU cores available:     {mp.cpu_count()}")
-        print(f"   Worker processes:        {self.num_workers}")
-        print(f"   Chunk size:              {self.chunk_size:,} lines")
-        print(f"   Expected speedup:        {self.num_workers * 0.92:.1f}x")
-        print()
+        if not quiet:
+            print(f"[INFO] Parallel Tokenizer Configuration")
+            print(f"   CPU cores available:     {mp.cpu_count()}")
+            print(f"   Worker processes:        {self.num_workers}")
+            print(f"   Chunk size:              {self.chunk_size:,} lines")
+            print(f"   Expected speedup:        {self.num_workers * 0.92:.1f}x")
+            print()
 
     def tokenize_file(
             self,
@@ -121,22 +125,24 @@ class ParallelTokenizer:
         Returns:
             Statistics dictionary
         """
-        if show_progress:
+        if show_progress and not self.quiet:
             print(f"[INFO] Starting parallel tokenization")
             print(f"   Input:  {input_path.name}")
-            print(f"   Output: {output_path.name if output_path else 'None (return only)'}")
+            if output_path:
+                print(f"   Output: {output_path.name}")
 
         start_time = time.time()
 
         # Read file and split into chunks
-        chunks = self._create_chunks(input_path, show_progress)
+        if show_progress and not self.quiet:
+            print(f"[INFO] Reading and splitting input file...")
+        chunks = self._create_chunks(input_path, show_progress and not self.quiet)
 
-        if show_progress:
-            print(f"[INFO] Created {len(chunks)} processing chunks")
-            print(f"[INFO] Starting {self.num_workers} worker processes...")
+        if show_progress and not self.quiet:
+            print(f"[INFO] Created {len(chunks)} chunks, starting {self.num_workers} workers...")
 
         # Process chunks in parallel
-        results = self._process_parallel(chunks, show_progress)
+        results = self._process_parallel(chunks, show_progress and not self.quiet)
 
         # Collect statistics
         total_tokens = sum(r.num_tokens for r in results)
@@ -148,8 +154,7 @@ class ParallelTokenizer:
         throughput_mb_s = file_size_mb / total_time
 
         # Calculate efficiency
-        # Efficiency = actual_speedup / theoretical_speedup
-        single_core_time = processing_time  # Sum of all worker times
+        single_core_time = processing_time
         parallel_time = total_time
         actual_speedup = single_core_time / parallel_time
         theoretical_speedup = self.num_workers
@@ -171,12 +176,14 @@ class ParallelTokenizer:
 
         # Write output if requested
         if output_path:
+            if show_progress and not self.quiet:
+                print(f"[INFO] Writing output...")
             self._write_output(results, output_path)
-            if show_progress:
+            if show_progress and not self.quiet:
                 print(f"[SUCCESS] Output written: {output_path}")
 
         # Display statistics
-        if show_progress:
+        if show_progress and not self.quiet:
             self._print_statistics(stats)
 
         return stats
@@ -244,14 +251,50 @@ class ParallelTokenizer:
         Returns:
             List of results
         """
-        # Create worker pool
-        with mp.Pool(processes=self.num_workers) as pool:
-            # Map jobs to workers
-            worker_args = [(chunk, str(self.model_path)) for chunk in chunks]
-            results = pool.starmap(
-                _tokenize_chunk_worker,
-                worker_args
-            )
+        import sys
+
+        # Create worker pool with error handling for notebook environments
+        try:
+            # Suppress worker stdout to prevent IOStream issues in notebooks
+            with mp.Pool(
+                processes=self.num_workers,
+                initializer=_worker_init
+            ) as pool:
+                # Map jobs to workers
+                worker_args = [(chunk, str(self.model_path)) for chunk in chunks]
+
+                # Use imap for progress tracking and better error handling
+                results = []
+                completed = 0
+
+                for result in pool.imap_unordered(
+                    _tokenize_chunk_worker_wrapper,
+                    worker_args,
+                    chunksize=10
+                ):
+                    results.append(result)
+                    completed += 1
+
+                    # Show progress every 100 chunks
+                    if show_progress and completed % 100 == 0:
+                        progress = (completed / len(chunks)) * 100
+                        print(f"\r[PROGRESS] {completed}/{len(chunks)} chunks ({progress:.1f}%)",
+                              end='', flush=True)
+
+                if show_progress:
+                    print()  # New line after progress
+
+        except Exception as e:
+            print(f"\n[ERROR] Parallel processing failed: {e}", file=sys.stderr)
+            print("[INFO] Falling back to single-process mode...", file=sys.stderr)
+            # Fallback to sequential processing
+            results = []
+            for i, (chunk, model_path) in enumerate(worker_args):
+                if show_progress and i % 100 == 0:
+                    print(f"\r[PROGRESS] {i}/{len(worker_args)} chunks", end='', flush=True)
+                results.append(_tokenize_chunk_worker(chunk, model_path))
+            if show_progress:
+                print()
 
         return results
 
@@ -326,6 +369,15 @@ class ParallelTokenizer:
         print("\n" + "=" * 70)
 
 
+def _worker_init():
+    """Initialize worker process - suppress output to prevent IOStream issues."""
+    import sys
+    import os
+    # Redirect stdout/stderr to devnull in worker processes
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
+
+
 def _tokenize_chunk_worker(
         job: TokenizationJob,
         model_path: str
@@ -369,6 +421,11 @@ def _tokenize_chunk_worker(
     )
 
 
+def _tokenize_chunk_worker_wrapper(args):
+    """Wrapper for unpacking arguments in imap."""
+    return _tokenize_chunk_worker(*args)
+
+
 # === CONVENIENCE FUNCTION ===
 
 def tokenize_file_parallel(
@@ -376,7 +433,8 @@ def tokenize_file_parallel(
         model_path: Path,
         output_path: Optional[Path] = None,
         num_workers: Optional[int] = None,
-        chunk_size: int = 10000
+        chunk_size: int = 10000,
+        quiet: bool = False
 ) -> Dict[str, Any]:
     """
     Convenience function for parallel tokenization.
@@ -387,6 +445,7 @@ def tokenize_file_parallel(
         output_path: Output file for token IDs (optional)
         num_workers: Number of worker processes (default: auto)
         chunk_size: Lines per chunk
+        quiet: Suppress detailed output (useful for notebooks)
 
     Returns:
         Statistics dictionary
@@ -394,11 +453,12 @@ def tokenize_file_parallel(
     tokenizer = ParallelTokenizer(
         model_path=model_path,
         num_workers=num_workers,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
+        quiet=quiet
     )
 
     return tokenizer.tokenize_file(
         input_path=input_path,
         output_path=output_path,
-        show_progress=True
+        show_progress=not quiet
     )
