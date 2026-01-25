@@ -16,6 +16,7 @@ from ..preprocessing.base import (
     print_error,
     ProgressBar
 )
+from .statistics import StatisticsCollector, CorpusStatistics, TokenizerStatistics
 
 try:
     import sentencepiece as spm
@@ -75,7 +76,8 @@ class BPETokenizer:
         self,
         input_path: Path,
         output_dir: Path,
-        model_prefix: str = 'tokenizer'
+        model_prefix: str = 'tokenizer',
+        save_statistics: bool = True
     ):
         """
         Train BPE tokenizer on input files.
@@ -91,6 +93,7 @@ class BPETokenizer:
             input_path: Path to text file OR directory containing .txt files
             output_dir: Directory to save model
             model_prefix: Prefix for model files (default: 'tokenizer')
+            save_statistics: Whether to collect and save detailed statistics (default: True)
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         self.model_prefix = str(output_dir / model_prefix)
@@ -99,6 +102,14 @@ class BPETokenizer:
         print_info(f"Vocabulary size: {self.vocab_size:,}")
         print_info(f"Character coverage: {self.character_coverage}")
         print_info(f"Model type: {self.model_type}")
+
+        # === CORPUS STATISTICS COLLECTION ===
+        corpus_stats = None
+        if save_statistics:
+            stats_collector = StatisticsCollector()
+            corpus_stats = stats_collector.analyze_corpus(input_path)
+            stats_collector.print_statistics(corpus_stats)
+            print()
 
         # Prepare input for SentencePiece
         # SentencePiece natively supports:
@@ -158,7 +169,35 @@ class BPETokenizer:
         print_success(f"Model saved: {self.model_prefix}.model")
         print_success(f"Vocabulary saved: {self.model_prefix}.vocab")
 
-        # Display statistics
+        # === TOKENIZER STATISTICS COLLECTION ===
+        if save_statistics and corpus_stats:
+            print()
+
+            # Sample texts for analysis
+            sample_texts = [
+                "Dobrý den, jak se máte?",
+                "Kontaktujte mě na email@example.com nebo telefonně.",
+                "Vědecká analýza lingvistických vzorců.",
+                "Morfologicky bohatý jazyk vyžaduje specifický přístup."
+            ]
+
+            tokenizer_stats = stats_collector.analyze_tokenizer(
+                self.sp_model,
+                self.config,
+                corpus_stats,
+                sample_texts=sample_texts
+            )
+
+            # Print tokenizer statistics
+            print()
+            stats_collector.print_statistics(corpus_stats, tokenizer_stats)
+
+            # Save combined statistics to JSON
+            stats_path = output_dir / f'{model_prefix}.statistics.json'
+            stats_collector.save_statistics(corpus_stats, tokenizer_stats, stats_path)
+            print()
+
+        # Display basic statistics
         self._print_statistics()
 
     def _print_statistics(self):
@@ -175,7 +214,6 @@ class BPETokenizer:
         sample_texts = [
             "Dobrý den, jak se máte?",
             "Kontaktujte mě na email@example.com",
-            "České národní kolo"
         ]
 
         print_section("Sample Tokenization")

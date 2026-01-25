@@ -105,6 +105,12 @@ Research Notes:
         help='Show vocabulary statistics'
     )
 
+    parser.add_argument(
+        '--no-statistics',
+        action='store_true',
+        help='Disable detailed statistical analysis (saves time on large corpora)'
+    )
+
     args = parser.parse_args()
 
     # Validate inputs
@@ -185,7 +191,8 @@ Research Notes:
         tokenizer.train(
             input_path=input_path,
             output_dir=output_dir,
-            model_prefix=args.model_prefix
+            model_prefix=args.model_prefix,
+            save_statistics=not args.no_statistics
         )
 
         # Show vocabulary statistics
@@ -202,10 +209,21 @@ Research Notes:
         print_info(f"Model:      {output_dir}/{args.model_prefix}.model")
         print_info(f"Vocabulary: {output_dir}/{args.model_prefix}.vocab")
 
+        if not args.no_statistics:
+            print_info(f"Statistics: {output_dir}/{args.model_prefix}.statistics.json")
+
         print_section("Next Steps")
         print("   1. Review tokenizer statistics")
         print("   2. Test tokenization on sample texts")
         print("   3. Prepare training sequences: slim-prepare-sequences")
+
+        if not args.no_statistics:
+            print("\n   Statistical Analysis:")
+            print(f"      - Corpus metrics (TTR, entropy, coverage)")
+            print(f"      - Tokenizer performance (compression, fertility)")
+            print(f"      - Czech-specific metrics (diacritic preservation)")
+            print(f"      - All metrics are mathematically defined and reproducible")
+
         print("=" * 70)
 
         return 0
