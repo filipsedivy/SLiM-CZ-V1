@@ -179,7 +179,7 @@ Chunk Size Guidelines:
         print_section("Tokenization Progress")
     else:
         # In quiet mode, just show basic info
-        print(f"[INFO] Tokenizing {input_path.name} ({input_path.stat().st_size / (1024**3):.2f} GB)")
+        print(f"[INFO] Tokenizing {input_path.name} ({input_path.stat().st_size / (1024 ** 3):.2f} GB)")
         print(f"[INFO] Using {args.workers or 'auto'} workers, chunk size {args.chunk_size:,}")
 
     # Perform parallel tokenization
@@ -206,7 +206,7 @@ Chunk Size Guidelines:
             print_header("Tokenization Completed")
 
             print_section("Performance Summary")
-            print_info(f"Total time:       {stats['total_time_seconds']:.2f} seconds")
+            print_info(f"Total time:       {total_time:.2f} seconds")
             print_info(f"Throughput:       {stats['throughput_mb_per_second']:.2f} MB/s")
             print_info(f"Actual speedup:   {stats['actual_speedup']:.2f}x")
             print_info(f"Efficiency:       {stats['efficiency']:.1%}")
@@ -244,7 +244,7 @@ Chunk Size Guidelines:
             print("=" * 70)
         else:
             # In quiet mode, just show essential results
-            print(f"[SUCCESS] Tokenization completed in {stats['total_time_seconds']:.1f}s")
+            print(f"[SUCCESS] Tokenization completed in {total_time:.1f}s")
             print(f"[INFO] Throughput: {stats['throughput_mb_per_second']:.1f} MB/s")
             print(f"[INFO] Total tokens: {stats['total_tokens']:,}")
             print(f"[SUCCESS] Output: {output_path}")
