@@ -73,7 +73,6 @@ slim-extract-text = "slim_cz_v1.cli.extract_text:main"
 slim-train = "slim_cz_v1.train:main"
 slim-inference = "slim_cz_v1.inference:main"
 slim-recommend = "slim_cz_v1.recommend_config:main"
-slim-diagnose = "slim_cz_v1.diagnose:main"
 
 [project.urls]
 Homepage = "https://github.com/filipsedivy/SLiM-CZ-V1"
