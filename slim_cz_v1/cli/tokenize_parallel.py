@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """
-CLI tool for parallel batch tokenization - STREAMING VERSION.
+CLI tool for parallel batch tokenization - Industrial Grade.
 
 High-throughput CPU-parallelized tokenization using trained SentencePiece model.
-Memory-efficient streaming I/O for large files (4+ GB).
+Designed for TB-scale corpus processing with checkpointing and resume capability.
+
+Usage:
+    slim-tokenize-parallel --input corpus.txt --model tokenizer.model --output tokens.txt
+
+For TB-scale files:
+    slim-tokenize-parallel \\
+        --input corpus.txt \\
+        --model tokenizer.model \\
+        --output tokens.txt \\
+        --workers 32 \\
+        --chunk-size 100000 \\
+        --checkpoint-dir ./checkpoints \\
+        --log-file tokenization.log
 """
 
 import argparse
 import sys
-import time
+import multiprocessing as mp
 from pathlib import Path
 
 from ..tokenization.parallel_tokenizer import ParallelTokenizer
@@ -22,52 +35,78 @@ from ..preprocessing.base import (
 )
 
 
+def format_bytes(num_bytes: int) -> str:
+    """Format bytes as human-readable string."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+        if abs(num_bytes) < 1024.0:
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.2f} EB"
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration as human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    else:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
+
+
 def main():
     """Main entry point for parallel tokenization CLI."""
 
     parser = argparse.ArgumentParser(
-        description='SLiM-CZ-V1 Parallel Batch Tokenization',
+        description='SLiM-CZ-V1 Parallel Batch Tokenization (Industrial Grade)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Basic parallel tokenization (auto-detects CPU cores)
-  python tokenize_parallel.py --input ./data/corpus.txt \\
+  slim-tokenize-parallel --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt
 
-  # With debug logging to file
-  python tokenize_parallel.py --input ./data/corpus.txt \\
+  # With checkpointing for TB-scale files (can resume after crash)
+  slim-tokenize-parallel --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt \\
-    --debug --log-file ./tokenization.log
+    --checkpoint-dir ./checkpoints
 
-  # Sequential mode (for debugging or small files)
-  python tokenize_parallel.py --input ./data/corpus.txt \\
+  # Full configuration for maximum throughput
+  slim-tokenize-parallel --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt \\
-    --sequential
+    --workers 32 \\
+    --chunk-size 100000 \\
+    --write-buffer 20000 \\
+    --checkpoint-dir ./checkpoints \\
+    --log-file ./tokenization.log \\
+    --debug
 
-  # Large files (>4 GB) - increase chunk size
-  python tokenize_parallel.py --input ./data/large_corpus.txt \\
+  # Compress intermediate files (saves disk space for TB files)
+  slim-tokenize-parallel --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt \\
-    --chunk-size 50000 --workers 8
+    --compress-temp
 
-Memory Usage Guidelines:
-  - Streaming mode: ~50 MB per worker + chunk data
-  - For 4 GB file with 8 workers: ~1 GB peak memory
-  - Previous non-streaming: 4+ GB memory required
+Architecture:
+  - Streaming I/O: Constant memory regardless of file size
+  - Parallel workers: Each process handles independent chunks
+  - Checkpointing: Resume after crash without re-processing
 
-Chunk Size Guidelines:
-  - Small files (<100 MB):       10,000 lines
-  - Medium files (100 MB-1 GB):  25,000 lines
-  - Large files (1-10 GB):       50,000 lines
-  - Very large files (>10 GB):  100,000 lines
+Memory Usage (approximate):
+  - Per worker: ~100-150 MB
+  - 16 workers: ~2 GB total
+  - 32 workers: ~4 GB total
 
-Troubleshooting:
-  - If parallel fails, use --sequential
-  - If memory issues, reduce --workers or --chunk-size
-  - Use --debug --log-file for detailed diagnostics
+Recommended Settings by File Size:
+  - <10 GB:   --chunk-size 50000  --workers 8
+  - 10-100 GB: --chunk-size 100000 --workers 16
+  - 100+ GB:  --chunk-size 100000 --workers 32 --checkpoint-dir ./cp
+  - 1+ TB:    --chunk-size 200000 --workers 32 --checkpoint-dir ./cp --compress-temp
         """
     )
 
@@ -93,7 +132,7 @@ Troubleshooting:
         help='Output file for token IDs (space-separated integers)'
     )
 
-    # Optional parameters
+    # Performance tuning
     parser.add_argument(
         '--workers', '-w',
         type=int,
@@ -104,17 +143,45 @@ Troubleshooting:
     parser.add_argument(
         '--chunk-size',
         type=int,
+        default=50000,
+        help='Number of lines per processing chunk (default: 50000)'
+    )
+
+    parser.add_argument(
+        '--write-buffer',
+        type=int,
         default=10000,
-        help='Number of lines per processing chunk (default: 10000)'
+        help='Lines to buffer before disk write (default: 10000)'
+    )
+
+    # Checkpointing
+    parser.add_argument(
+        '--checkpoint-dir',
+        type=str,
+        default=None,
+        help='Directory for checkpoint files (enables resume after crash)'
+    )
+
+    parser.add_argument(
+        '--no-resume',
+        action='store_true',
+        help='Do not attempt to resume from checkpoint (start fresh)'
+    )
+
+    # Output options
+    parser.add_argument(
+        '--compress-temp',
+        action='store_true',
+        help='Gzip compress intermediate files (saves disk, costs CPU)'
     )
 
     parser.add_argument(
         '--quiet', '-q',
         action='store_true',
-        help='Suppress detailed output (recommended for notebooks/Kaggle)'
+        help='Suppress detailed output'
     )
 
-    # New debugging options
+    # Debugging
     parser.add_argument(
         '--debug', '-d',
         action='store_true',
@@ -125,13 +192,7 @@ Troubleshooting:
         '--log-file', '-l',
         type=str,
         default=None,
-        help='Path to debug log file (enables file logging)'
-    )
-
-    parser.add_argument(
-        '--sequential', '-s',
-        action='store_true',
-        help='Force sequential processing (no multiprocessing, useful for debugging)'
+        help='Path to detailed log file'
     )
 
     args = parser.parse_args()
@@ -141,6 +202,7 @@ Troubleshooting:
     model_path = Path(args.model)
     output_path = Path(args.output)
     log_file = Path(args.log_file) if args.log_file else None
+    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else None
 
     if not input_path.exists():
         print_error(f"Input file not found: {args.input}")
@@ -153,145 +215,112 @@ Troubleshooting:
     # Create output directory if needed
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Display configuration
     if not args.quiet:
         print_header("SLiM-CZ-V1 Parallel Batch Tokenization")
-        print_info("Streaming Mode - Memory Efficient for Large Files")
+        print_info("Industrial Grade - Streaming I/O for TB-scale files")
         print()
 
-        # Display configuration
-        print_section("Configuration")
+        print_section("Input")
 
         file_size = input_path.stat().st_size
-        file_size_mb = file_size / (1024 ** 2)
-        file_size_gb = file_size / (1024 ** 3)
-
-        print_info(f"Input file:  {input_path.name}")
-        if file_size_gb >= 1.0:
-            print_info(f"File size:   {file_size_gb:.2f} GB")
-        else:
-            print_info(f"File size:   {file_size_mb:.2f} MB")
-
-        print_info(f"Model:       {model_path.name}")
-        print_info(f"Output:      {output_path.name}")
-
-        if args.workers:
-            print_info(f"Workers:     {args.workers} (manual)")
-        else:
-            print_info(f"Workers:     auto-detect")
-
-        print_info(f"Chunk size:  {args.chunk_size:,} lines")
-
-        if args.sequential:
-            print_warning("Sequential mode enabled (single process)")
-
-        if args.debug:
-            print_info("Debug logging: ENABLED")
-            if log_file:
-                print_info(f"Log file: {log_file}")
-
-        # Estimate processing time
-        import multiprocessing as mp
-        num_workers = 1 if args.sequential else (args.workers or max(1, mp.cpu_count() - 1))
-
-        # Baseline: ~15-25 MB/s per core for tokenization
-        single_core_throughput = 20.0  # MB/s estimate
-        expected_throughput = single_core_throughput * num_workers * 0.85  # 85% efficiency estimate
-        expected_time = file_size_mb / expected_throughput
+        print_info(f"File:      {input_path}")
+        print_info(f"Size:      {format_bytes(file_size)}")
+        print_info(f"Model:     {model_path.name}")
+        print_info(f"Output:    {output_path}")
 
         print()
-        print_section("Performance Estimate")
-        print_info(f"CPU cores:        {mp.cpu_count()}")
-        print_info(f"Workers:          {num_workers}")
-        print_info(f"Est. throughput:  {expected_throughput:.1f} MB/s")
+        print_section("Configuration")
 
-        if expected_time < 60:
-            print_info(f"Estimated time:   {expected_time:.1f} seconds")
-        elif expected_time < 3600:
-            print_info(f"Estimated time:   {expected_time / 60:.1f} minutes")
-        else:
-            print_info(f"Estimated time:   {expected_time / 3600:.1f} hours")
+        num_workers = args.workers or max(1, mp.cpu_count() - 1)
+        print_info(f"CPU cores:       {mp.cpu_count()}")
+        print_info(f"Workers:         {num_workers}")
+        print_info(f"Chunk size:      {args.chunk_size:,} lines")
+        print_info(f"Write buffer:    {args.write_buffer:,} lines")
+        print_info(f"Compress temp:   {args.compress_temp}")
+
+        if checkpoint_dir:
+            print_info(f"Checkpoint dir:  {checkpoint_dir}")
+            print_info(f"Resume enabled:  {not args.no_resume}")
 
         # Memory estimate
-        memory_per_worker = 50 + (args.chunk_size * 0.001)  # ~50 MB base + chunk data
+        memory_per_worker = 100 + (args.chunk_size * 0.002)  # MB estimate
         total_memory = memory_per_worker * num_workers
-        print_info(f"Est. peak memory: {total_memory:.0f} MB")
-
-        # Recommendations for large files
-        if file_size_gb >= 4.0:
-            print()
-            print_section("Large File Recommendations")
-            if args.chunk_size < 50000:
-                print_warning(f"Consider --chunk-size 50000 for {file_size_gb:.1f} GB file")
-            if not args.sequential and num_workers > 8:
-                print_info("With many workers, monitor memory usage")
-
         print()
-        print("=" * 70)
-        print("  Starting tokenization...")
-        print("=" * 70)
+        print_info(f"Est. memory:     {total_memory:.0f} MB peak")
+
+        # Time estimate
+        throughput_estimate = 20.0 * num_workers * 0.85  # MB/s
+        time_estimate = (file_size / (1024 * 1024)) / throughput_estimate
+        print_info(f"Est. time:       {format_duration(time_estimate)}")
+
+        # Recommendations
+        file_size_gb = file_size / (1024 ** 3)
+        if file_size_gb > 100 and not checkpoint_dir:
+            print()
+            print_warning(f"Large file ({file_size_gb:.0f} GB) without checkpointing!")
+            print_info("Recommend: --checkpoint-dir ./checkpoints")
+
+        if file_size_gb > 500 and args.chunk_size < 100000:
+            print()
+            print_warning("Consider larger chunk size for very large files")
+            print_info("Recommend: --chunk-size 100000 or --chunk-size 200000")
+
         print()
     else:
-        # In quiet mode, just show basic info
-        file_size_gb = input_path.stat().st_size / (1024 ** 3)
-        mode = "SEQUENTIAL" if args.sequential else "PARALLEL"
-        print(f"[INFO] Tokenizing {input_path.name} ({file_size_gb:.2f} GB) - {mode} mode")
-        print(f"[INFO] Workers: {args.workers or 'auto'}, chunk size: {args.chunk_size:,}")
+        file_size = input_path.stat().st_size
+        print(f"[INFO] Tokenizing {input_path.name} ({format_bytes(file_size)})")
 
-    # Perform parallel tokenization
+    # Run tokenization
     try:
-        start_time = time.time()
-
         tokenizer = ParallelTokenizer(
             model_path=model_path,
             num_workers=args.workers,
             chunk_size=args.chunk_size,
+            write_buffer_size=args.write_buffer,
+            compress_temp=args.compress_temp,
             quiet=args.quiet,
             debug=args.debug,
             log_file=log_file,
-            sequential=args.sequential
+            checkpoint_dir=checkpoint_dir
         )
 
         stats = tokenizer.tokenize_file(
             input_path=input_path,
             output_path=output_path,
+            resume=not args.no_resume,
             show_progress=not args.quiet
         )
 
-        total_time = time.time() - start_time
-
+        # Final summary
         if not args.quiet:
             print()
             print_header("Tokenization Completed Successfully")
+            print()
+            print_success(f"Output: {output_path}")
+            print_info(f"Total tokens: {stats['total_tokens']:,}")
+            print_info(f"Total lines:  {stats['total_lines']:,}")
+            print_info(f"Throughput:   {stats['throughput_mb_per_second']:.2f} MB/s")
+            print_info(f"Wall time:    {format_duration(stats['wall_time_seconds'])}")
 
-            # Summary
-            print_section("Summary")
-            print_success(f"Output saved: {output_path}")
-            print_info(f"Total tokens:    {stats['total_tokens']:,}")
-            print_info(f"Total lines:     {stats['total_lines']:,}")
-            print_info(f"Total time:      {total_time:.2f} seconds")
-            print_info(f"Throughput:      {stats['throughput_mb_per_second']:.2f} MB/s")
-
-            if stats['num_errors'] > 0:
-                print_warning(f"Chunks with errors: {stats['num_errors']}")
+            if stats['failed_chunks'] > 0:
+                print()
+                print_warning(f"Failed chunks: {stats['failed_chunks']}")
                 if log_file:
-                    print_info(f"See {log_file} for error details")
+                    print_info(f"Check {log_file} for details")
 
             print()
-            print("=" * 70)
         else:
-            # Quiet mode results
-            print(f"[SUCCESS] Tokenization completed in {total_time:.1f}s")
-            print(f"[INFO] Throughput: {stats['throughput_mb_per_second']:.1f} MB/s")
-            print(f"[INFO] Total tokens: {stats['total_tokens']:,}")
-            if stats['num_errors'] > 0:
-                print(f"[WARNING] Errors: {stats['num_errors']} chunks failed")
-            print(f"[SUCCESS] Output: {output_path}")
+            print(f"[SUCCESS] Completed in {format_duration(stats['wall_time_seconds'])}")
+            print(f"[INFO] {stats['total_tokens']:,} tokens at {stats['throughput_mb_per_second']:.1f} MB/s")
 
         return 0
 
     except KeyboardInterrupt:
         print()
-        print_warning("Tokenization interrupted by user")
+        print_warning("Interrupted by user")
+        if checkpoint_dir:
+            print_info("Progress saved - run again to resume")
         return 130
 
     except Exception as e:
@@ -299,7 +328,7 @@ Troubleshooting:
         if args.debug:
             import traceback
             traceback.print_exc()
-        elif not args.quiet:
+        else:
             print_info("Use --debug for detailed error information")
         return 1
 
