@@ -67,8 +67,9 @@ all = [
 
 # CLI entry points
 [project.scripts]
-slim-extract-text = "slim_cz_v1.cli.extract_text:main"
 slim-train-tokenizer = "slim_cz_v1.cli.train_tokenizer:main"
+slim-tokenize-parallel = "slim_cz_v1.cli.tokenize_parallel:main"
+slim-extract-text = "slim_cz_v1.cli.extract_text:main"
 slim-train = "slim_cz_v1.train:main"
 slim-inference = "slim_cz_v1.inference:main"
 slim-recommend = "slim_cz_v1.recommend_config:main"
