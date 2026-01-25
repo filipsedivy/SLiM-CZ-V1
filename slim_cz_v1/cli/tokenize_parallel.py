@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-CLI tool for parallel batch tokenization.
+CLI tool for parallel batch tokenization - STREAMING VERSION.
 
 High-throughput CPU-parallelized tokenization using trained SentencePiece model.
+Memory-efficient streaming I/O for large files (4+ GB).
 """
 
 import argparse
@@ -30,32 +31,43 @@ def main():
         epilog="""
 Examples:
   # Basic parallel tokenization (auto-detects CPU cores)
-  slim-tokenize-parallel --input ./data/corpus.txt \\
+  python tokenize_parallel.py --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt
 
-  # Specify number of workers
-  slim-tokenize-parallel --input ./data/corpus.txt \\
+  # With debug logging to file
+  python tokenize_parallel.py --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt \\
-    --workers 16
+    --debug --log-file ./tokenization.log
 
-  # Adjust chunk size for large files
-  slim-tokenize-parallel --input ./data/corpus.txt \\
+  # Sequential mode (for debugging or small files)
+  python tokenize_parallel.py --input ./data/corpus.txt \\
     --model ./models/tokenizer/tokenizer.model \\
     --output ./data/tokens.txt \\
-    --chunk-size 50000
+    --sequential
 
-Performance Notes:
-  - Automatic CPU core detection (uses N-1 cores)
-  - Expected speedup: 10-15x on modern CPUs
-  - Efficiency: 90-95% parallelization
-  - GPU not used (no benefit for I/O-bound operations)
+  # Large files (>4 GB) - increase chunk size
+  python tokenize_parallel.py --input ./data/large_corpus.txt \\
+    --model ./models/tokenizer/tokenizer.model \\
+    --output ./data/tokens.txt \\
+    --chunk-size 50000 --workers 8
+
+Memory Usage Guidelines:
+  - Streaming mode: ~50 MB per worker + chunk data
+  - For 4 GB file with 8 workers: ~1 GB peak memory
+  - Previous non-streaming: 4+ GB memory required
 
 Chunk Size Guidelines:
   - Small files (<100 MB):       10,000 lines
-  - Medium files (100-1000 MB):  50,000 lines
-  - Large files (>1 GB):        100,000 lines
+  - Medium files (100 MB-1 GB):  25,000 lines
+  - Large files (1-10 GB):       50,000 lines
+  - Very large files (>10 GB):  100,000 lines
+
+Troubleshooting:
+  - If parallel fails, use --sequential
+  - If memory issues, reduce --workers or --chunk-size
+  - Use --debug --log-file for detailed diagnostics
         """
     )
 
@@ -102,12 +114,33 @@ Chunk Size Guidelines:
         help='Suppress detailed output (recommended for notebooks/Kaggle)'
     )
 
+    # New debugging options
+    parser.add_argument(
+        '--debug', '-d',
+        action='store_true',
+        help='Enable verbose debug logging'
+    )
+
+    parser.add_argument(
+        '--log-file', '-l',
+        type=str,
+        default=None,
+        help='Path to debug log file (enables file logging)'
+    )
+
+    parser.add_argument(
+        '--sequential', '-s',
+        action='store_true',
+        help='Force sequential processing (no multiprocessing, useful for debugging)'
+    )
+
     args = parser.parse_args()
 
     # Validate inputs
     input_path = Path(args.input)
     model_path = Path(args.model)
     output_path = Path(args.output)
+    log_file = Path(args.log_file) if args.log_file else None
 
     if not input_path.exists():
         print_error(f"Input file not found: {args.input}")
@@ -122,6 +155,8 @@ Chunk Size Guidelines:
 
     if not args.quiet:
         print_header("SLiM-CZ-V1 Parallel Batch Tokenization")
+        print_info("Streaming Mode - Memory Efficient for Large Files")
+        print()
 
         # Display configuration
         print_section("Configuration")
@@ -146,41 +181,61 @@ Chunk Size Guidelines:
 
         print_info(f"Chunk size:  {args.chunk_size:,} lines")
 
+        if args.sequential:
+            print_warning("Sequential mode enabled (single process)")
+
+        if args.debug:
+            print_info("Debug logging: ENABLED")
+            if log_file:
+                print_info(f"Log file: {log_file}")
+
         # Estimate processing time
         import multiprocessing as mp
-        num_workers = args.workers or max(1, mp.cpu_count() - 1)
+        num_workers = 1 if args.sequential else (args.workers or max(1, mp.cpu_count() - 1))
 
-        # Single-core baseline: ~20 MB/s
-        single_core_time = file_size_mb / 20.0
-
-        # Multi-core with 92% efficiency
-        expected_throughput = 20.0 * num_workers * 0.92
+        # Baseline: ~15-25 MB/s per core for tokenization
+        single_core_throughput = 20.0  # MB/s estimate
+        expected_throughput = single_core_throughput * num_workers * 0.85  # 85% efficiency estimate
         expected_time = file_size_mb / expected_throughput
 
         print()
         print_section("Performance Estimate")
         print_info(f"CPU cores:        {mp.cpu_count()}")
         print_info(f"Workers:          {num_workers}")
-        print_info(f"Expected speedup: {num_workers * 0.92:.1f}x")
-        print_info(f"Estimated time:   {expected_time:.1f} seconds")
+        print_info(f"Est. throughput:  {expected_throughput:.1f} MB/s")
 
-        if single_core_time > 60:
-            time_saved = single_core_time - expected_time
-            print_info(f"Time saved:       {time_saved:.0f} seconds vs single-core")
+        if expected_time < 60:
+            print_info(f"Estimated time:   {expected_time:.1f} seconds")
+        elif expected_time < 3600:
+            print_info(f"Estimated time:   {expected_time / 60:.1f} minutes")
+        else:
+            print_info(f"Estimated time:   {expected_time / 3600:.1f} hours")
 
-        # Warning for small files
-        if file_size_mb < 10:
+        # Memory estimate
+        memory_per_worker = 50 + (args.chunk_size * 0.001)  # ~50 MB base + chunk data
+        total_memory = memory_per_worker * num_workers
+        print_info(f"Est. peak memory: {total_memory:.0f} MB")
+
+        # Recommendations for large files
+        if file_size_gb >= 4.0:
             print()
-            print_warning("Small file detected (<10 MB)")
-            print_info("Parallel processing overhead may exceed benefits")
-            print_info("Consider using single-core for files <10 MB")
+            print_section("Large File Recommendations")
+            if args.chunk_size < 50000:
+                print_warning(f"Consider --chunk-size 50000 for {file_size_gb:.1f} GB file")
+            if not args.sequential and num_workers > 8:
+                print_info("With many workers, monitor memory usage")
 
         print()
-        print_section("Tokenization Progress")
+        print("=" * 70)
+        print("  Starting tokenization...")
+        print("=" * 70)
+        print()
     else:
         # In quiet mode, just show basic info
-        print(f"[INFO] Tokenizing {input_path.name} ({input_path.stat().st_size / (1024 ** 3):.2f} GB)")
-        print(f"[INFO] Using {args.workers or 'auto'} workers, chunk size {args.chunk_size:,}")
+        file_size_gb = input_path.stat().st_size / (1024 ** 3)
+        mode = "SEQUENTIAL" if args.sequential else "PARALLEL"
+        print(f"[INFO] Tokenizing {input_path.name} ({file_size_gb:.2f} GB) - {mode} mode")
+        print(f"[INFO] Workers: {args.workers or 'auto'}, chunk size: {args.chunk_size:,}")
 
     # Perform parallel tokenization
     try:
@@ -190,7 +245,10 @@ Chunk Size Guidelines:
             model_path=model_path,
             num_workers=args.workers,
             chunk_size=args.chunk_size,
-            quiet=args.quiet
+            quiet=args.quiet,
+            debug=args.debug,
+            log_file=log_file,
+            sequential=args.sequential
         )
 
         stats = tokenizer.tokenize_file(
@@ -203,58 +261,46 @@ Chunk Size Guidelines:
 
         if not args.quiet:
             print()
-            print_header("Tokenization Completed")
+            print_header("Tokenization Completed Successfully")
 
-            print_section("Performance Summary")
-            print_info(f"Total time:       {total_time:.2f} seconds")
-            print_info(f"Throughput:       {stats['throughput_mb_per_second']:.2f} MB/s")
-            print_info(f"Actual speedup:   {stats['actual_speedup']:.2f}x")
-            print_info(f"Efficiency:       {stats['efficiency']:.1%}")
-            print_info(f"Tokens/second:    {stats['tokens_per_second']:,.0f}")
-
-            # Efficiency interpretation
-            if stats['efficiency'] >= 0.90:
-                print_success("Excellent parallelization efficiency")
-            elif stats['efficiency'] >= 0.75:
-                print_info("Good parallelization efficiency")
-            else:
-                print_warning("Lower efficiency - consider adjusting chunk size")
-
-            print()
-            print_section("Output")
-            print_success(f"Token IDs saved: {output_path}")
+            # Summary
+            print_section("Summary")
+            print_success(f"Output saved: {output_path}")
             print_info(f"Total tokens:    {stats['total_tokens']:,}")
-            print_info(f"Chunks processed: {stats['num_chunks']:,}")
+            print_info(f"Total lines:     {stats['total_lines']:,}")
+            print_info(f"Total time:      {total_time:.2f} seconds")
+            print_info(f"Throughput:      {stats['throughput_mb_per_second']:.2f} MB/s")
+
+            if stats['num_errors'] > 0:
+                print_warning(f"Chunks with errors: {stats['num_errors']}")
+                if log_file:
+                    print_info(f"See {log_file} for error details")
 
             print()
-            print_section("Next Steps")
-            print("   1. Review tokenization statistics above")
-            print("   2. Prepare training sequences: python prepare_sequences.py")
-            print("   3. Integrate tokenizer statistics for comprehensive analysis")
-
-            # Show prepare_sequences command
-            print()
-            print("   Recommended command:")
-            print(f"      python prepare_sequences.py \\")
-            print(f"        --input {output_path} \\")
-            print(f"        --output ./data/prepared \\")
-            print(f"        --seq-len 512 \\")
-            print(f"        --tokenizer-stats {model_path.parent}/tokenizer.statistics.json")
-
             print("=" * 70)
         else:
-            # In quiet mode, just show essential results
+            # Quiet mode results
             print(f"[SUCCESS] Tokenization completed in {total_time:.1f}s")
             print(f"[INFO] Throughput: {stats['throughput_mb_per_second']:.1f} MB/s")
             print(f"[INFO] Total tokens: {stats['total_tokens']:,}")
+            if stats['num_errors'] > 0:
+                print(f"[WARNING] Errors: {stats['num_errors']} chunks failed")
             print(f"[SUCCESS] Output: {output_path}")
 
         return 0
 
+    except KeyboardInterrupt:
+        print()
+        print_warning("Tokenization interrupted by user")
+        return 130
+
     except Exception as e:
         print_error(f"Tokenization failed: {e}")
-        import traceback
-        traceback.print_exc()
+        if args.debug:
+            import traceback
+            traceback.print_exc()
+        elif not args.quiet:
+            print_info("Use --debug for detailed error information")
         return 1
 
 

@@ -1,78 +1,117 @@
 """
-Parallel Batch Tokenization Module.
+Parallel Batch Tokenization Module - STREAMING VERSION.
 
-Provides CPU-parallelized tokenization for high-throughput processing.
-GPU is not used as it provides no benefit for tokenization (I/O bound operation).
+Memory-efficient CPU-parallelized tokenization for large files.
+Uses streaming I/O and disk-based intermediate storage.
 """
 
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Iterator
+from typing import List, Optional, Dict, Any, Iterator, Tuple
 import multiprocessing as mp
 from dataclasses import dataclass
 import time
-from collections import defaultdict
+import tempfile
+import shutil
+import os
+import sys
+import logging
+import traceback
 
 try:
     import sentencepiece as spm
-
     SENTENCEPIECE_AVAILABLE = True
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
 
 
+# ============================================================
+# LOGGING CONFIGURATION
+# ============================================================
+
+def setup_logger(debug: bool = False, log_file: Optional[Path] = None) -> logging.Logger:
+    """Setup logger with optional file output."""
+    logger = logging.getLogger('parallel_tokenizer')
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    # Clear existing handlers
+    logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    console_format = logging.Formatter('[%(levelname)s] %(message)s')
+    console_handler.setFormatter(console_format)
+    logger.addHandler(console_handler)
+
+    # File handler (if requested)
+    if log_file:
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_format = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+        file_handler.setFormatter(file_format)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+# ============================================================
+# DATA CLASSES
+# ============================================================
+
 @dataclass
-class TokenizationJob:
-    """Single tokenization job."""
-    job_id: int
-    text_chunk: str
-    start_line: int
-    end_line: int
+class ChunkInfo:
+    """Lightweight chunk reference (no data in memory)."""
+    chunk_id: int
+    start_byte: int
+    end_byte: int
+    line_count: int
 
 
 @dataclass
 class TokenizationResult:
     """Result from tokenization job."""
-    job_id: int
-    token_ids: List[List[int]]
+    chunk_id: int
+    output_file: str  # Path to temp file with results
     num_tokens: int
+    num_lines: int
     processing_time: float
+    error: Optional[str] = None
 
+
+# ============================================================
+# STREAMING PARALLEL TOKENIZER
+# ============================================================
 
 class ParallelTokenizer:
     """
-    CPU-parallelized batch tokenizer.
+    Memory-efficient parallel tokenizer using streaming I/O.
 
-    PERFORMANCE ANALYSIS:
-    - Single-core baseline: ~20 MB/s
-    - Multi-process (N cores): ~20 MB/s * N * 0.92 (efficiency)
-    - Expected speedup: 10-15x on modern CPUs
+    KEY IMPROVEMENTS OVER PREVIOUS VERSION:
+    1. Never loads entire file into memory
+    2. Each worker writes results to temp file immediately
+    3. Final merge is streaming (read chunk, write, delete)
+    4. Proper error propagation from workers
+    5. Comprehensive debug logging
 
-    WHY NOT GPU:
-    - Tokenization is I/O bound, not compute bound
-    - GPU memory transfer overhead (2-5 ms) exceeds tokenization time (~1-2 ms)
-    - Random hash table lookups (vocabulary) perform worse on GPU
-    - Multi-process CPU is faster than GPU for this workload
+    MEMORY USAGE:
+    - Main process: ~100 MB overhead + chunk_size lines
+    - Each worker: ~50 MB (tokenizer model) + chunk_size lines
+    - Peak: num_workers * (50 MB + chunk_size * avg_line_size)
 
-    ALGORITHM:
-    1. Split corpus into chunks
-    2. Distribute chunks to worker processes
-    3. Each worker loads tokenizer model (fork shares memory)
-    4. Process chunks in parallel
-    5. Collect results
-
-    Features:
-    - Automatic core detection
-    - Configurable chunk size
-    - Progress tracking
-    - Statistics collection
+    For 4 GB file with 16 workers and 10k chunk_size:
+    - Previous version: 4+ GB in memory (all chunks)
+    - This version: ~1 GB peak (workers + current chunks)
     """
 
     def __init__(
-            self,
-            model_path: Path,
-            num_workers: Optional[int] = None,
-            chunk_size: int = 10000,  # lines per chunk
-            quiet: bool = False
+        self,
+        model_path: Path,
+        num_workers: Optional[int] = None,
+        chunk_size: int = 10000,
+        quiet: bool = False,
+        debug: bool = False,
+        log_file: Optional[Path] = None,
+        sequential: bool = False
     ):
         """
         Initialize parallel tokenizer.
@@ -81,7 +120,10 @@ class ParallelTokenizer:
             model_path: Path to SentencePiece model
             num_workers: Number of worker processes (default: CPU count - 1)
             chunk_size: Number of lines per processing chunk
-            quiet: Suppress initialization output (useful for notebooks)
+            quiet: Suppress all output
+            debug: Enable verbose debug logging
+            log_file: Path to debug log file (enables file logging)
+            sequential: Force sequential processing (no multiprocessing)
         """
         if not SENTENCEPIECE_AVAILABLE:
             raise ImportError("SentencePiece required: pip install sentencepiece")
@@ -90,351 +132,531 @@ class ParallelTokenizer:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found: {model_path}")
 
-        # Determine optimal worker count
-        if num_workers is None:
-            cpu_count = mp.cpu_count()
-            # Reserve 1 core for main process and I/O
-            num_workers = max(1, cpu_count - 1)
-
-        self.num_workers = num_workers
-        self.chunk_size = chunk_size
+        # Setup logging
+        self.logger = setup_logger(debug=debug, log_file=log_file)
+        self.debug = debug
         self.quiet = quiet
+        self.sequential = sequential
+
+        # Determine worker count
+        if sequential:
+            self.num_workers = 1
+        elif num_workers is None:
+            cpu_count = mp.cpu_count()
+            self.num_workers = max(1, cpu_count - 1)
+        else:
+            self.num_workers = num_workers
+
+        self.chunk_size = chunk_size
+
+        # Temp directory for intermediate files
+        self.temp_dir: Optional[Path] = None
 
         if not quiet:
-            print(f"[INFO] Parallel Tokenizer Configuration")
-            print(f"   CPU cores available:     {mp.cpu_count()}")
-            print(f"   Worker processes:        {self.num_workers}")
-            print(f"   Chunk size:              {self.chunk_size:,} lines")
-            print(f"   Expected speedup:        {self.num_workers * 0.92:.1f}x")
-            print()
+            self._print_config()
+
+    def _print_config(self):
+        """Print configuration summary."""
+        print("=" * 70)
+        print("  Parallel Tokenizer Configuration (Streaming Mode)")
+        print("=" * 70)
+        print(f"   Model:              {self.model_path.name}")
+        print(f"   CPU cores:          {mp.cpu_count()}")
+        print(f"   Worker processes:   {self.num_workers}")
+        print(f"   Chunk size:         {self.chunk_size:,} lines")
+        print(f"   Processing mode:    {'SEQUENTIAL' if self.sequential else 'PARALLEL'}")
+        print(f"   Debug logging:      {'ENABLED' if self.debug else 'disabled'}")
+        print("=" * 70)
+        print()
 
     def tokenize_file(
-            self,
-            input_path: Path,
-            output_path: Optional[Path] = None,
-            show_progress: bool = True
+        self,
+        input_path: Path,
+        output_path: Path,
+        show_progress: bool = True
     ) -> Dict[str, Any]:
         """
-        Tokenize text file in parallel.
+        Tokenize text file with streaming I/O.
 
         Args:
             input_path: Input text file
-            output_path: Output file for token IDs (optional)
+            output_path: Output file for token IDs
             show_progress: Show progress information
 
         Returns:
             Statistics dictionary
         """
-        if show_progress and not self.quiet:
-            print(f"[INFO] Starting parallel tokenization")
-            print(f"   Input:  {input_path.name}")
-            if output_path:
-                print(f"   Output: {output_path.name}")
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+
+        file_size = input_path.stat().st_size
+        file_size_mb = file_size / (1024 ** 2)
+        file_size_gb = file_size / (1024 ** 3)
+
+        self.logger.info(f"Input file: {input_path}")
+        self.logger.info(f"File size: {file_size_gb:.2f} GB ({file_size:,} bytes)")
+        self.logger.info(f"Output: {output_path}")
 
         start_time = time.time()
 
-        # Read file and split into chunks
-        if show_progress and not self.quiet:
-            print(f"[INFO] Reading and splitting input file...")
-        chunks = self._create_chunks(input_path, show_progress and not self.quiet)
+        # Create temp directory
+        self.temp_dir = Path(tempfile.mkdtemp(prefix='tokenizer_'))
+        self.logger.debug(f"Temp directory: {self.temp_dir}")
+
+        try:
+            # PHASE 1: Count lines and create chunk boundaries
+            if show_progress and not self.quiet:
+                print("[PHASE 1/4] Scanning input file...")
+
+            chunks = self._scan_file(input_path, show_progress)
+            self.logger.info(f"Created {len(chunks)} chunks")
+
+            # PHASE 2: Process chunks
+            if show_progress and not self.quiet:
+                print(f"[PHASE 2/4] Processing {len(chunks)} chunks with {self.num_workers} workers...")
+
+            if self.sequential:
+                results = self._process_sequential(input_path, chunks, show_progress)
+            else:
+                results = self._process_parallel(input_path, chunks, show_progress)
+
+            # Check for errors
+            errors = [r for r in results if r.error]
+            if errors:
+                self.logger.error(f"Errors in {len(errors)} chunks!")
+                for err in errors[:5]:  # Show first 5
+                    self.logger.error(f"  Chunk {err.chunk_id}: {err.error}")
+                if len(errors) > 5:
+                    self.logger.error(f"  ... and {len(errors) - 5} more errors")
+
+            # PHASE 3: Merge results
+            if show_progress and not self.quiet:
+                print("[PHASE 3/4] Merging results...")
+
+            total_tokens, total_lines = self._merge_results(results, output_path, show_progress)
+
+            # PHASE 4: Calculate statistics
+            total_time = time.time() - start_time
+            processing_time = sum(r.processing_time for r in results if not r.error)
+
+            stats = self._calculate_stats(
+                total_tokens=total_tokens,
+                total_lines=total_lines,
+                num_chunks=len(chunks),
+                total_time=total_time,
+                processing_time=processing_time,
+                file_size_mb=file_size_mb,
+                num_errors=len(errors)
+            )
+
+            if show_progress and not self.quiet:
+                print("[PHASE 4/4] Complete!")
+                self._print_statistics(stats)
+
+            return stats
+
+        finally:
+            # Cleanup temp directory
+            if self.temp_dir and self.temp_dir.exists():
+                self.logger.debug(f"Cleaning up temp directory: {self.temp_dir}")
+                try:
+                    shutil.rmtree(self.temp_dir)
+                except Exception as e:
+                    self.logger.warning(f"Failed to cleanup temp dir: {e}")
+
+    def _scan_file(
+        self,
+        input_path: Path,
+        show_progress: bool
+    ) -> List[ChunkInfo]:
+        """
+        Scan file to determine chunk boundaries without loading into memory.
+
+        Returns list of ChunkInfo with byte positions.
+        """
+        chunks = []
+        chunk_id = 0
+        line_count = 0
+        chunk_start_byte = 0
+        chunk_line_count = 0
+        total_lines = 0
+
+        self.logger.debug("Scanning file for chunk boundaries...")
+
+        with open(input_path, 'rb') as f:
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+
+                line_count += 1
+                chunk_line_count += 1
+                total_lines += 1
+
+                if chunk_line_count >= self.chunk_size:
+                    current_byte = f.tell()
+                    chunks.append(ChunkInfo(
+                        chunk_id=chunk_id,
+                        start_byte=chunk_start_byte,
+                        end_byte=current_byte,
+                        line_count=chunk_line_count
+                    ))
+
+                    if self.debug and chunk_id % 100 == 0:
+                        self.logger.debug(f"Chunk {chunk_id}: bytes {chunk_start_byte}-{current_byte}, {chunk_line_count} lines")
+
+                    chunk_id += 1
+                    chunk_start_byte = current_byte
+                    chunk_line_count = 0
+
+                # Progress update
+                if show_progress and not self.quiet and total_lines % 1_000_000 == 0:
+                    print(f"\r   Scanned {total_lines:,} lines, {chunk_id} chunks...", end='', flush=True)
+
+        # Add remaining lines
+        if chunk_line_count > 0:
+            current_byte = input_path.stat().st_size
+            chunks.append(ChunkInfo(
+                chunk_id=chunk_id,
+                start_byte=chunk_start_byte,
+                end_byte=current_byte,
+                line_count=chunk_line_count
+            ))
 
         if show_progress and not self.quiet:
-            print(f"[INFO] Created {len(chunks)} chunks, starting {self.num_workers} workers...")
+            print(f"\r   Scanned {total_lines:,} lines, {len(chunks)} chunks    ")
 
-        # Process chunks in parallel
-        results = self._process_parallel(chunks, show_progress and not self.quiet)
+        self.logger.info(f"Total lines: {total_lines:,}")
+        self.logger.info(f"Total chunks: {len(chunks)}")
 
-        # Collect statistics
-        total_tokens = sum(r.num_tokens for r in results)
-        total_time = time.time() - start_time
-        processing_time = sum(r.processing_time for r in results)
+        return chunks
 
-        # Calculate throughput
-        file_size_mb = input_path.stat().st_size / (1024 * 1024)
-        throughput_mb_s = file_size_mb / total_time
+    def _process_sequential(
+        self,
+        input_path: Path,
+        chunks: List[ChunkInfo],
+        show_progress: bool
+    ) -> List[TokenizationResult]:
+        """Process chunks sequentially (single process)."""
+        self.logger.info("Processing in SEQUENTIAL mode")
 
-        # Calculate efficiency
-        single_core_time = processing_time
-        parallel_time = total_time
-        actual_speedup = single_core_time / parallel_time
-        theoretical_speedup = self.num_workers
-        efficiency = actual_speedup / theoretical_speedup
+        results = []
 
-        stats = {
+        for i, chunk in enumerate(chunks):
+            if show_progress and not self.quiet:
+                progress = ((i + 1) / len(chunks)) * 100
+                print(f"\r   Processing chunk {i+1}/{len(chunks)} ({progress:.1f}%)...", end='', flush=True)
+
+            try:
+                result = _process_single_chunk(
+                    input_path=str(input_path),
+                    chunk=chunk,
+                    model_path=str(self.model_path),
+                    temp_dir=str(self.temp_dir),
+                    debug=self.debug
+                )
+                results.append(result)
+
+                if self.debug:
+                    self.logger.debug(f"Chunk {chunk.chunk_id}: {result.num_tokens} tokens, {result.processing_time:.2f}s")
+
+            except Exception as e:
+                self.logger.error(f"Chunk {chunk.chunk_id} failed: {e}")
+                self.logger.debug(traceback.format_exc())
+                results.append(TokenizationResult(
+                    chunk_id=chunk.chunk_id,
+                    output_file="",
+                    num_tokens=0,
+                    num_lines=0,
+                    processing_time=0,
+                    error=str(e)
+                ))
+
+        if show_progress and not self.quiet:
+            print()
+
+        return results
+
+    def _process_parallel(
+        self,
+        input_path: Path,
+        chunks: List[ChunkInfo],
+        show_progress: bool
+    ) -> List[TokenizationResult]:
+        """Process chunks in parallel with proper error handling."""
+        self.logger.info(f"Processing in PARALLEL mode with {self.num_workers} workers")
+
+        # Prepare worker arguments
+        worker_args = [
+            (str(input_path), chunk, str(self.model_path), str(self.temp_dir), self.debug)
+            for chunk in chunks
+        ]
+
+        results = []
+        completed = 0
+
+        try:
+            # Use spawn instead of fork for better compatibility
+            ctx = mp.get_context('spawn')
+
+            with ctx.Pool(processes=self.num_workers) as pool:
+                # Use imap_unordered for better memory efficiency
+                for result in pool.imap_unordered(
+                    _process_chunk_wrapper,
+                    worker_args,
+                    chunksize=max(1, len(chunks) // (self.num_workers * 4))
+                ):
+                    results.append(result)
+                    completed += 1
+
+                    if result.error:
+                        self.logger.error(f"Worker error in chunk {result.chunk_id}: {result.error}")
+                    elif self.debug and completed % 50 == 0:
+                        self.logger.debug(f"Completed {completed}/{len(chunks)} chunks")
+
+                    if show_progress and not self.quiet and completed % 10 == 0:
+                        progress = (completed / len(chunks)) * 100
+                        print(f"\r   Processing: {completed}/{len(chunks)} chunks ({progress:.1f}%)...", end='', flush=True)
+
+            if show_progress and not self.quiet:
+                print(f"\r   Processing: {completed}/{len(chunks)} chunks (100.0%)    ")
+
+        except Exception as e:
+            self.logger.error(f"Parallel processing failed: {e}")
+            self.logger.error(traceback.format_exc())
+
+            if show_progress and not self.quiet:
+                print(f"\n[WARNING] Parallel processing failed, falling back to sequential...")
+
+            # Fallback to sequential
+            return self._process_sequential(input_path, chunks, show_progress)
+
+        return results
+
+    def _merge_results(
+        self,
+        results: List[TokenizationResult],
+        output_path: Path,
+        show_progress: bool
+    ) -> Tuple[int, int]:
+        """
+        Merge all result files into final output.
+
+        Uses streaming to avoid loading all results into memory.
+        """
+        # Sort by chunk_id to maintain order
+        results = sorted(results, key=lambda r: r.chunk_id)
+
+        total_tokens = 0
+        total_lines = 0
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'w', encoding='utf-8') as out_f:
+            for i, result in enumerate(results):
+                if result.error or not result.output_file:
+                    self.logger.warning(f"Skipping chunk {result.chunk_id} (error)")
+                    continue
+
+                result_path = Path(result.output_file)
+                if not result_path.exists():
+                    self.logger.warning(f"Result file missing: {result_path}")
+                    continue
+
+                # Stream copy from temp file to output
+                with open(result_path, 'r', encoding='utf-8') as in_f:
+                    for line in in_f:
+                        out_f.write(line)
+                        total_lines += 1
+
+                total_tokens += result.num_tokens
+
+                # Delete temp file after copying
+                try:
+                    result_path.unlink()
+                except:
+                    pass
+
+                if show_progress and not self.quiet and (i + 1) % 100 == 0:
+                    progress = ((i + 1) / len(results)) * 100
+                    print(f"\r   Merging: {i+1}/{len(results)} chunks ({progress:.1f}%)...", end='', flush=True)
+
+        if show_progress and not self.quiet:
+            print(f"\r   Merging: {len(results)}/{len(results)} chunks (100.0%)    ")
+
+        self.logger.info(f"Merged {total_lines:,} lines, {total_tokens:,} tokens")
+
+        return total_tokens, total_lines
+
+    def _calculate_stats(
+        self,
+        total_tokens: int,
+        total_lines: int,
+        num_chunks: int,
+        total_time: float,
+        processing_time: float,
+        file_size_mb: float,
+        num_errors: int
+    ) -> Dict[str, Any]:
+        """Calculate performance statistics."""
+        throughput_mb_s = file_size_mb / total_time if total_time > 0 else 0
+
+        # Efficiency calculation
+        if self.sequential or self.num_workers <= 1:
+            actual_speedup = 1.0
+            efficiency = 1.0
+        else:
+            # processing_time is sum of all worker times
+            # In perfect parallelization: processing_time = total_time * num_workers
+            theoretical_parallel_time = processing_time / self.num_workers
+            actual_speedup = theoretical_parallel_time / total_time if total_time > 0 else 1.0
+            efficiency = min(1.0, actual_speedup)  # Cap at 100%
+
+        return {
             'total_tokens': total_tokens,
-            'num_chunks': len(chunks),
+            'total_lines': total_lines,
+            'num_chunks': num_chunks,
             'num_workers': self.num_workers,
+            'num_errors': num_errors,
             'total_time_seconds': total_time,
             'processing_time_seconds': processing_time,
             'file_size_mb': file_size_mb,
             'throughput_mb_per_second': throughput_mb_s,
             'actual_speedup': actual_speedup,
-            'theoretical_speedup': theoretical_speedup,
+            'theoretical_speedup': self.num_workers,
             'efficiency': efficiency,
-            'tokens_per_second': total_tokens / total_time
+            'tokens_per_second': total_tokens / total_time if total_time > 0 else 0,
+            'sequential_mode': self.sequential
         }
 
-        # Write output if requested
-        if output_path:
-            if show_progress and not self.quiet:
-                print(f"[INFO] Writing output...")
-            self._write_output(results, output_path)
-            if show_progress and not self.quiet:
-                print(f"[SUCCESS] Output written: {output_path}")
-
-        # Display statistics
-        if show_progress and not self.quiet:
-            self._print_statistics(stats)
-
-        return stats
-
-    def _create_chunks(
-            self,
-            input_path: Path,
-            show_progress: bool
-    ) -> List[TokenizationJob]:
-        """
-        Split input file into processing chunks.
-
-        Args:
-            input_path: Input file
-            show_progress: Show progress
-
-        Returns:
-            List of tokenization jobs
-        """
-        chunks = []
-        job_id = 0
-        current_chunk = []
-        start_line = 0
-
-        with open(input_path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                current_chunk.append(line)
-
-                if len(current_chunk) >= self.chunk_size:
-                    # Create job
-                    chunks.append(TokenizationJob(
-                        job_id=job_id,
-                        text_chunk=''.join(current_chunk),
-                        start_line=start_line,
-                        end_line=line_num
-                    ))
-
-                    job_id += 1
-                    current_chunk = []
-                    start_line = line_num
-
-        # Add remaining lines
-        if current_chunk:
-            chunks.append(TokenizationJob(
-                job_id=job_id,
-                text_chunk=''.join(current_chunk),
-                start_line=start_line,
-                end_line=start_line + len(current_chunk)
-            ))
-
-        return chunks
-
-    def _process_parallel(
-            self,
-            chunks: List[TokenizationJob],
-            show_progress: bool
-    ) -> List[TokenizationResult]:
-        """
-        Process chunks in parallel using multiprocessing.
-
-        Args:
-            chunks: List of jobs
-            show_progress: Show progress
-
-        Returns:
-            List of results
-        """
-        import sys
-
-        # Create worker pool with error handling for notebook environments
-        try:
-            # Suppress worker stdout to prevent IOStream issues in notebooks
-            with mp.Pool(
-                processes=self.num_workers,
-                initializer=_worker_init
-            ) as pool:
-                # Map jobs to workers
-                worker_args = [(chunk, str(self.model_path)) for chunk in chunks]
-
-                # Use imap for progress tracking and better error handling
-                results = []
-                completed = 0
-
-                for result in pool.imap_unordered(
-                    _tokenize_chunk_worker_wrapper,
-                    worker_args,
-                    chunksize=10
-                ):
-                    results.append(result)
-                    completed += 1
-
-                    # Show progress every 100 chunks
-                    if show_progress and completed % 100 == 0:
-                        progress = (completed / len(chunks)) * 100
-                        print(f"\r[PROGRESS] {completed}/{len(chunks)} chunks ({progress:.1f}%)",
-                              end='', flush=True)
-
-                if show_progress:
-                    print()  # New line after progress
-
-        except Exception as e:
-            print(f"\n[ERROR] Parallel processing failed: {e}", file=sys.stderr)
-            print("[INFO] Falling back to single-process mode...", file=sys.stderr)
-            # Fallback to sequential processing
-            results = []
-            for i, (chunk, model_path) in enumerate(worker_args):
-                if show_progress and i % 100 == 0:
-                    print(f"\r[PROGRESS] {i}/{len(worker_args)} chunks", end='', flush=True)
-                results.append(_tokenize_chunk_worker(chunk, model_path))
-            if show_progress:
-                print()
-
-        return results
-
-    def _write_output(
-            self,
-            results: List[TokenizationResult],
-            output_path: Path
-    ):
-        """
-        Write tokenization results to file.
-
-        Args:
-            results: Tokenization results
-            output_path: Output file path
-        """
-        # Sort by job_id to maintain order
-        results = sorted(results, key=lambda r: r.job_id)
-
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for result in results:
-                for token_ids in result.token_ids:
-                    # Write as space-separated token IDs
-                    f.write(' '.join(map(str, token_ids)) + '\n')
-
     def _print_statistics(self, stats: Dict[str, Any]):
-        """
-        Print tokenization statistics.
-
-        Args:
-            stats: Statistics dictionary
-        """
+        """Print tokenization statistics."""
         print()
         print("=" * 70)
-        print("  Parallel Tokenization Statistics")
+        print("  Tokenization Statistics")
         print("=" * 70)
 
         print("\n   === PERFORMANCE ===")
         print(f"   Total time:              {stats['total_time_seconds']:.2f} seconds")
-        print(f"   Processing time (sum):   {stats['processing_time_seconds']:.2f} seconds")
         print(f"   File size:               {stats['file_size_mb']:.2f} MB")
         print(f"   Throughput:              {stats['throughput_mb_per_second']:.2f} MB/s")
         print(f"   Tokens per second:       {stats['tokens_per_second']:,.0f}")
 
-        print("\n   === PARALLELIZATION EFFICIENCY ===")
-        print(f"   Workers:                 {stats['num_workers']}")
-        print(f"   Theoretical speedup:     {stats['theoretical_speedup']:.1f}x")
-        print(f"   Actual speedup:          {stats['actual_speedup']:.2f}x")
-        print(f"   Efficiency:              {stats['efficiency']:.2%}")
-        print(f"      Formula: actual_speedup / theoretical_speedup")
-
-        # Interpret efficiency
-        if stats['efficiency'] >= 0.90:
-            print(f"      [SUCCESS] Excellent parallelization efficiency")
-        elif stats['efficiency'] >= 0.75:
-            print(f"      [INFO] Good parallelization efficiency")
-        elif stats['efficiency'] >= 0.60:
-            print(f"      [WARNING] Moderate efficiency - consider adjusting chunk size")
+        if not stats['sequential_mode']:
+            print("\n   === PARALLELIZATION ===")
+            print(f"   Workers:                 {stats['num_workers']}")
+            print(f"   Efficiency:              {stats['efficiency']:.1%}")
         else:
-            print(f"      [WARNING] Low efficiency - I/O or synchronization bottleneck")
+            print("\n   === MODE ===")
+            print(f"   Processing:              SEQUENTIAL (single process)")
+
+        if stats['num_errors'] > 0:
+            print(f"\n   === ERRORS ===")
+            print(f"   Failed chunks:           {stats['num_errors']}")
 
         print("\n   === OUTPUT ===")
         print(f"   Total tokens:            {stats['total_tokens']:,}")
+        print(f"   Total lines:             {stats['total_lines']:,}")
         print(f"   Chunks processed:        {stats['num_chunks']:,}")
-
-        # Calculate single-core comparison
-        single_core_time = stats['total_time_seconds'] * stats['actual_speedup']
-        print(f"\n   === COMPARISON ===")
-        print(f"   Single-core time (est):  {single_core_time:.2f} seconds")
-        print(f"   Multi-core time:         {stats['total_time_seconds']:.2f} seconds")
-        print(f"   Time saved:              {single_core_time - stats['total_time_seconds']:.2f} seconds")
 
         print("\n" + "=" * 70)
 
 
-def _worker_init():
-    """Initialize worker process - suppress output to prevent IOStream issues."""
-    import sys
-    import os
-    # Redirect stdout/stderr to devnull in worker processes
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
+# ============================================================
+# WORKER FUNCTIONS (must be at module level for pickling)
+# ============================================================
 
-
-def _tokenize_chunk_worker(
-        job: TokenizationJob,
-        model_path: str
+def _process_single_chunk(
+    input_path: str,
+    chunk: ChunkInfo,
+    model_path: str,
+    temp_dir: str,
+    debug: bool = False
 ) -> TokenizationResult:
     """
-    Worker function for tokenizing a chunk.
+    Process a single chunk - reads bytes from file, tokenizes, writes to temp file.
 
-    This function is executed in a separate process.
-
-    Args:
-        job: Tokenization job
-        model_path: Path to SentencePiece model
-
-    Returns:
-        Tokenization result
+    This function is designed to be memory-efficient:
+    - Only loads one chunk at a time
+    - Writes results immediately to disk
+    - Does not keep token IDs in memory
     """
     start_time = time.time()
 
-    # Load tokenizer (shared via fork on Unix, copied on Windows)
-    sp = spm.SentencePieceProcessor()
-    sp.load(model_path)
+    try:
+        # Load tokenizer
+        sp = spm.SentencePieceProcessor()
+        sp.load(model_path)
 
-    # Tokenize lines
-    lines = job.text_chunk.strip().split('\n')
-    token_ids = []
-    total_tokens = 0
+        # Read chunk from file using byte positions
+        with open(input_path, 'rb') as f:
+            f.seek(chunk.start_byte)
+            chunk_bytes = f.read(chunk.end_byte - chunk.start_byte)
 
-    for line in lines:
-        if line.strip():  # Skip empty lines
-            ids = sp.encode_as_ids(line)
-            token_ids.append(ids)
-            total_tokens += len(ids)
+        # Decode to text
+        chunk_text = chunk_bytes.decode('utf-8', errors='replace')
+        lines = chunk_text.strip().split('\n')
 
-    processing_time = time.time() - start_time
+        # Create output file
+        output_file = Path(temp_dir) / f"chunk_{chunk.chunk_id:06d}.txt"
 
-    return TokenizationResult(
-        job_id=job.job_id,
-        token_ids=token_ids,
-        num_tokens=total_tokens,
-        processing_time=processing_time
-    )
+        total_tokens = 0
+        num_lines = 0
+
+        # Tokenize and write immediately
+        with open(output_file, 'w', encoding='utf-8') as out_f:
+            for line in lines:
+                line = line.strip()
+                if line:
+                    token_ids = sp.encode_as_ids(line)
+                    out_f.write(' '.join(map(str, token_ids)) + '\n')
+                    total_tokens += len(token_ids)
+                    num_lines += 1
+
+        processing_time = time.time() - start_time
+
+        return TokenizationResult(
+            chunk_id=chunk.chunk_id,
+            output_file=str(output_file),
+            num_tokens=total_tokens,
+            num_lines=num_lines,
+            processing_time=processing_time
+        )
+
+    except Exception as e:
+        return TokenizationResult(
+            chunk_id=chunk.chunk_id,
+            output_file="",
+            num_tokens=0,
+            num_lines=0,
+            processing_time=time.time() - start_time,
+            error=f"{type(e).__name__}: {str(e)}"
+        )
 
 
-def _tokenize_chunk_worker_wrapper(args):
-    """Wrapper for unpacking arguments in imap."""
-    return _tokenize_chunk_worker(*args)
+def _process_chunk_wrapper(args):
+    """Wrapper for multiprocessing - unpacks arguments."""
+    input_path, chunk, model_path, temp_dir, debug = args
+    return _process_single_chunk(input_path, chunk, model_path, temp_dir, debug)
 
 
-# === CONVENIENCE FUNCTION ===
+# ============================================================
+# CONVENIENCE FUNCTION
+# ============================================================
 
 def tokenize_file_parallel(
-        input_path: Path,
-        model_path: Path,
-        output_path: Optional[Path] = None,
-        num_workers: Optional[int] = None,
-        chunk_size: int = 10000,
-        quiet: bool = False
+    input_path: Path,
+    model_path: Path,
+    output_path: Path,
+    num_workers: Optional[int] = None,
+    chunk_size: int = 10000,
+    quiet: bool = False,
+    debug: bool = False,
+    log_file: Optional[Path] = None,
+    sequential: bool = False
 ) -> Dict[str, Any]:
     """
     Convenience function for parallel tokenization.
@@ -442,10 +664,13 @@ def tokenize_file_parallel(
     Args:
         input_path: Input text file
         model_path: SentencePiece model file
-        output_path: Output file for token IDs (optional)
+        output_path: Output file for token IDs
         num_workers: Number of worker processes (default: auto)
-        chunk_size: Lines per chunk
-        quiet: Suppress detailed output (useful for notebooks)
+        chunk_size: Lines per chunk (default: 10000)
+        quiet: Suppress output
+        debug: Enable debug logging
+        log_file: Path to debug log file
+        sequential: Force sequential processing
 
     Returns:
         Statistics dictionary
@@ -454,7 +679,10 @@ def tokenize_file_parallel(
         model_path=model_path,
         num_workers=num_workers,
         chunk_size=chunk_size,
-        quiet=quiet
+        quiet=quiet,
+        debug=debug,
+        log_file=log_file,
+        sequential=sequential
     )
 
     return tokenizer.tokenize_file(
