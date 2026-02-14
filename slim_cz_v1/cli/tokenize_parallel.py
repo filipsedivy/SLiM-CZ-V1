@@ -21,6 +21,7 @@ For TB-scale files:
 
 import argparse
 import sys
+import json
 import multiprocessing as mp
 from pathlib import Path
 
@@ -33,6 +34,42 @@ from ..preprocessing.base import (
     print_warning,
     print_header
 )
+
+try:
+    import sentencepiece as spm
+except ImportError:
+    spm = None
+
+
+def _write_tokenization_metadata(
+    *,
+    output_path: Path,
+    model_path: Path,
+    stats: dict,
+    mode: str
+) -> Path | None:
+    """Write metadata file that helps later training-stage compatibility checks."""
+    if spm is None:
+        return None
+
+    sp = spm.SentencePieceProcessor()
+    sp.Load(str(model_path))
+
+    metadata = {
+        'format_version': '1.0',
+        'mode': mode,
+        'tokenizer_model': str(model_path.resolve()),
+        'tokenizer_vocab_size': int(sp.GetPieceSize()),
+        'total_tokens': int(stats.get('total_tokens', 0)),
+        'total_lines': int(stats.get('total_lines', 0)),
+        'token_file': str(output_path.resolve()),
+    }
+
+    meta_path = output_path.with_suffix(output_path.suffix + '.meta.json')
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+    return meta_path
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -422,9 +459,31 @@ Recommended Settings by Total Size:
                     print_info(f"Check {log_file} for details")
 
             print()
+
+            if not shard_mode or args.merge:
+                meta_path = _write_tokenization_metadata(
+                    output_path=output_path,
+                    model_path=model_path,
+                    stats=stats,
+                    mode='shards-merged' if shard_mode else 'single-file'
+                )
+                if meta_path:
+                    print_info(f"Metadata:     {meta_path}")
+                else:
+                    print_warning("Metadata not written (sentencepiece not available)")
         else:
             print(f"[SUCCESS] Completed in {format_duration(stats['wall_time_seconds'])}")
             print(f"[INFO] {stats['total_tokens']:,} tokens at {stats['throughput_mb_per_second']:.1f} MB/s")
+
+            if not shard_mode or args.merge:
+                meta_path = _write_tokenization_metadata(
+                    output_path=output_path,
+                    model_path=model_path,
+                    stats=stats,
+                    mode='shards-merged' if shard_mode else 'single-file'
+                )
+                if meta_path:
+                    print(f"[INFO] Metadata: {meta_path}")
 
         return 0
 

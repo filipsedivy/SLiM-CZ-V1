@@ -82,222 +82,85 @@ pip install tqdm tensorboard  # Optional: for progress bars and visualization
 
 ## 🔧 Command Line Interface (CLI)
 
-After installing the package with `pip install -e .` (or `uv pip install -e .`), five CLI commands become available in your environment. These provide a convenient way to work with SLiM-CZ-V1 without directly calling Python scripts.
-
-### Available Commands
+After installing with `pip install -e .` (or `uv pip install -e .`), these commands are available:
 
 | Command | Purpose |
 |---------|---------|
-| `slim-prepare-data` | Prepare and tokenize training data |
-| `slim-recommend` | Get optimal configuration recommendations |
-| `slim-train` | Train the language model |
-| `slim-inference` | Generate text with trained model |
-| `slim-diagnose` | Diagnose model and training issues |
-
-### Usage Examples
-
-#### 1. Data Preparation
-
-```bash
-# Using CLI command (recommended after installation)
-slim-prepare-data \
-    --input ./raw_texts \
-    --output ./data \
-    --vocab-size 16000 \
-    --seq-len 512
-
-# Or using Python script directly
-python prepare_data.py --input ./raw_texts --output ./data --vocab-size 16000 --seq-len 512
-```
-
-**Options:**
-- `--input, -i` (required): Input directory with text files
-- `--output, -o` (required): Output directory for processed data
-- `--vocab-size`: Vocabulary size (default: 16000)
-- `--seq-len`: Sequence length (default: 512)
-- `--stride`: Stride for sequences (default: 256)
-- `--train-split`: Training split ratio (default: 0.90)
-- `--val-split`: Validation split ratio (default: 0.05)
-- `--test-split`: Test split ratio (default: 0.05)
-- `--remove-urls`: Remove URLs from text (default: enabled)
-- `--remove-emails`: Remove emails from text (default: enabled)
-- `--min-line-length`: Minimum line length (default: 10)
-
-#### 2. Configuration Recommendation
-
-```bash
-# Using CLI command
-slim-recommend --data-dir ./data
-
-# Or using Python script
-python recommend_config.py ./data
-```
-
-**Arguments:**
-- `data_dir` (required): Path to prepared data directory
-- `config_dir` (optional): Directory for config files (default: current directory)
-
-#### 3. Model Training
-
-```bash
-# Using CLI command
-slim-train \
-    --config slim_cz_v1_default.yaml \
-    --data-dir ./data \
-    --output-dir ./output \
-    --tokenizer ./data/tokenizer.model
-
-# Or using Python script
-python train.py --config slim_cz_v1_default.yaml --data-dir ./data --output-dir ./output
-```
-
-**Options:**
-- `--config` (required): Path to configuration YAML file
-- `--data-dir` (required): Path to prepared data directory
-- `--output-dir` (required): Output directory for checkpoints and logs
-- `--tokenizer`: Path to tokenizer for sample generation (optional)
-- `--no-tensorboard`: Disable TensorBoard logging (optional)
-
-#### 4. Text Inference/Generation
-
-```bash
-# Interactive mode (recommended)
-slim-inference \
-    --checkpoint ./output/best_model.pt \
-    --tokenizer ./data/tokenizer.model
-
-# Single prompt generation
-slim-inference \
-    --checkpoint ./output/best_model.pt \
-    --tokenizer ./data/tokenizer.model \
-    --prompt "Praha je" \
-    --max-tokens 100 \
-    --temperature 0.8
-
-# Batch generation from file
-slim-inference \
-    --checkpoint ./output/best_model.pt \
-    --tokenizer ./data/tokenizer.model \
-    --prompts-file ./prompts.txt \
-    --output ./results.txt
-
-# Or using Python script
-python inference.py --checkpoint ./output/best_model.pt --tokenizer ./data/tokenizer.model
-```
-
-**Options:**
-- `--checkpoint` (required): Path to model checkpoint (.pt file)
-- `--tokenizer` (required): Path to tokenizer model (.model file)
-- `--prompt`: Single prompt for generation (optional)
-- `--prompts-file`: File with prompts, one per line (optional)
-- `--output`: Output file for batch generation (optional)
-- `--max-tokens`: Maximum tokens to generate (default: 100)
-- `--temperature`: Sampling temperature (default: 0.8)
-- `--top-k`: Top-k sampling (default: 50)
-- `--top-p`: Nucleus sampling threshold (default: 0.95)
-- `--repetition-penalty`: Repetition penalty (default: 1.2)
-- `--no-sample`: Use greedy decoding instead of sampling
-- `--device`: Device to use: cuda or cpu (default: auto-detect)
-
-#### 5. Model Diagnosis
-
-```bash
-# Using CLI command
-slim-diagnose ./output/best_model.pt ./data/tokenizer.model ./data
-
-# Or using Python script
-python diagnose.py ./output/best_model.pt ./data/tokenizer.model ./data
-```
-
-**Arguments:**
-- `checkpoint_path` (required): Path to model checkpoint
-- `tokenizer_path` (required): Path to tokenizer model
-- `data_dir` (optional): Path to data directory for validation
-
-### CLI vs Direct Python Scripts
-
-Both approaches work identically, but CLI commands offer advantages:
-
-**CLI Commands (`slim-*`):**
-- ✅ Available system-wide after installation
-- ✅ Shorter, cleaner syntax
-- ✅ Tab completion support (in some shells)
-- ✅ No need to remember script locations
-- ✅ Professional deployment ready
-
-**Direct Python Scripts (`python *.py`):**
-- ✅ Works without package installation
-- ✅ Easier for development/debugging
-- ✅ More transparent about execution
-
-**Recommendation:** Use CLI commands for production workflows and direct scripts for development.
+| `slim-extract-text` | Extract + clean corpus from TXT/PDF/EPUB |
+| `slim-train-tokenizer` | Train SentencePiece tokenizer |
+| `slim-tokenize-parallel` | Convert corpus text to token IDs |
+| `slim-train` | Train Transformer model on token IDs |
+| `slim-inference` | Generate text from trained checkpoint |
+| `slim-recommend` | Recommend model config from token count |
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Guaranteed Sequential Pipeline)
 
-### 1. Prepare Your Data
+This is the recommended **compatible** order:
+
+1. **Preprocessing** (`slim-extract-text`)
+2. **Tokenizer training** (`slim-train-tokenizer`)
+3. **Tokenization** (`slim-tokenize-parallel`)
+4. **Training** (`slim-train`)
+
+### 1) Preprocess raw files
 
 ```bash
-slim-prepare-data \
-    --input ./raw_texts \
-    --output ./data \
-    --vocab-size 16000 \
-    --seq-len 512
+slim-extract-text \
+  --input ./raw_data \
+  --output ./artifacts/processed \
+  --output-corpus ./artifacts/corpus.txt \
+  --max-workers 8
 ```
 
-**Supported file formats:** `.txt`, `.md`, `.rst`, `.py`, `.js`, `.html`, `.css`, `.json`, `.xml`, `.csv`, `.log`
+Supported input formats: `.txt`, `.pdf`, `.epub`.
 
-This creates:
-- `data/train.json` - Training sequences
-- `data/val.json` - Validation sequences
-- `data/tokenizer.model` - SentencePiece tokenizer
-- `data/stats.json` - Dataset statistics
-
-### 2. Recommend Optimal Configuration
+### 2) Train tokenizer
 
 ```bash
-slim-recommend --data-dir ./data
+slim-train-tokenizer \
+  --input ./artifacts/corpus.txt \
+  --output ./artifacts/tokenizer \
+  --model-prefix tokenizer \
+  --vocab-size 16000
 ```
 
-This tool analyzes your dataset and recommends the best model configuration based on:
-- Dataset size (number of tokens)
-- Chinchilla scaling laws
-- Predicted validation loss
-- Data efficiency score
+Produces:
+- `./artifacts/tokenizer/tokenizer.model`
+- `./artifacts/tokenizer/tokenizer.vocab`
 
-### 3. Train with Configuration
+### 3) Tokenize corpus to integer IDs
 
 ```bash
-# Train with recommended config
+slim-tokenize-parallel \
+  --input ./artifacts/corpus.txt \
+  --model ./artifacts/tokenizer/tokenizer.model \
+  --output ./artifacts/tokens.txt \
+  --workers 8
+```
+
+Produces:
+- `./artifacts/tokens.txt`
+- `./artifacts/tokens.txt.meta.json` (contains tokenizer vocab metadata for compatibility checks)
+
+### 4) Train model
+
+```bash
 slim-train \
-    --data-dir ./data \
-    --config slim_cz_v1_default.yaml \
-    --output-dir ./output
+  --config ./cfg/slim_cz_v1_default.yaml \
+  --tokens ./artifacts/tokens.txt \
+  --output ./output
 ```
 
-The training script:
-- Loads data and configuration
-- Initializes model with specified architecture
-- Trains with AdamW optimizer and cosine LR schedule
-- Saves checkpoints and best model
-- Logs metrics to TensorBoard (optional)
-- Implements early stopping
+> `slim-train` now performs an early compatibility check between tokenizer vocabulary (from `tokens.txt.meta.json`) and `model.vocab_size` in your YAML config. If they do not match, training stops with a clear error before wasting GPU/CPU time.
 
-### 4. Run Inference
+### 5) Inference
 
 ```bash
-# Interactive mode
 slim-inference \
-    --checkpoint ./output/best_model.pt \
-    --tokenizer ./data/tokenizer.model
-
-# One-time generation
-slim-inference \
-    --checkpoint ./output/best_model.pt \
-    --tokenizer ./data/tokenizer.model \
-    --prompt "Praha je" \
-    --max-tokens 100
+  --checkpoint ./output/best_model.pt \
+  --tokenizer ./artifacts/tokenizer/tokenizer.model
 ```
 
 ---
@@ -361,25 +224,25 @@ data:
 ```bash
 # Use predefined config (recommended)
 slim-train \
-    --data-dir ./data \
-    --config slim_cz_v1_tiny.yaml \
-    --output-dir ./output
+    --config ./cfg/slim_cz_v1_tiny.yaml \
+    --tokens ./artifacts/tokens.txt \
+    --output ./output
 
 slim-train \
-    --data-dir ./data \
-    --config slim_cz_v1_default.yaml \
-    --output-dir ./output
+    --config ./cfg/slim_cz_v1_default.yaml \
+    --tokens ./artifacts/tokens.txt \
+    --output ./output
 
 slim-train \
-    --data-dir ./data \
-    --config slim_cz_v1_medium.yaml \
-    --output-dir ./output
+    --config ./cfg/slim_cz_v1_medium.yaml \
+    --tokens ./artifacts/tokens.txt \
+    --output ./output
 
 # Use custom config file
 slim-train \
-    --data-dir ./data \
     --config path/to/custom.yaml \
-    --output-dir ./output
+    --tokens ./artifacts/tokens.txt \
+    --output ./output
 ```
 
 ---
@@ -387,36 +250,41 @@ slim-train \
 ## 🎯 Complete Workflow Example
 
 ```bash
-# 1. Prepare your text data (Czech text files)
-slim-prepare-data \
+# 1. Preprocess source documents
+slim-extract-text \
     --input ./czech_texts \
-    --output ./data \
+    --output ./artifacts/processed \
+    --output-corpus ./artifacts/corpus.txt
+
+# 2. Train tokenizer
+slim-train-tokenizer \
+    --input ./artifacts/corpus.txt \
+    --output ./artifacts/tokenizer \
+    --model-prefix tokenizer \
     --vocab-size 16000 \
-    --seq-len 512
+    --character-coverage 0.9999
 
-# 2. Analyze dataset and get recommendation
-slim-recommend --data-dir ./data
+# 3. Tokenize corpus with trained tokenizer
+slim-tokenize-parallel \
+    --input ./artifacts/corpus.txt \
+    --model ./artifacts/tokenizer/tokenizer.model \
+    --output ./artifacts/tokens.txt \
+    --workers 8
 
-# 3. Train with recommended configuration
+# 4. Train with selected configuration
 slim-train \
-    --data-dir ./data \
-    --config slim_cz_v1_default.yaml \
-    --output-dir ./output
+    --config ./cfg/slim_cz_v1_default.yaml \
+    --tokens ./artifacts/tokens.txt \
+    --output ./output
 
-# 4. Monitor training (in another terminal)
+# 5. Monitor training (optional)
 tensorboard --logdir ./output/tensorboard
 
-# 5. Test generation
+# 6. Test generation
 slim-inference \
     --checkpoint ./output/best_model.pt \
-    --tokenizer ./data/tokenizer.model \
+    --tokenizer ./artifacts/tokenizer/tokenizer.model \
     --prompt "Dnes je krásný den"
-
-# 6. Diagnose model quality
-slim-diagnose \
-    ./output/best_model.pt \
-    ./data/tokenizer.model \
-    ./data
 ```
 
 ---
@@ -466,23 +334,30 @@ Using a model too large for your dataset leads to overfitting. Use `slim-recomme
 
 1. **File Collection** - Recursively scan directories for supported formats
 2. **Text Cleaning** - Remove URLs, emails, normalize whitespace
-3. **Tokenization** - Train SentencePiece BPE tokenizer optimized for Czech
-4. **Sequence Creation** - Create overlapping sequences with configurable stride
-5. **Dataset Split** - Split into train/validation/test sets
+3. **Tokenizer Training** - Train SentencePiece BPE tokenizer on processed corpus
+4. **ID Tokenization** - Convert corpus lines to integer token IDs
+5. **Compatibility Metadata** - Save tokenizer/model compatibility metadata for training checks
 
 ### Advanced Options
 
 ```bash
-slim-prepare-data \
+slim-extract-text \
     --input ./texts \
-    --output ./data \
-    --vocab-size 16000 \
-    --seq-len 512 \
-    --stride 256 \
-    --train-split 0.9 \
-    --val-split 0.05 \
-    --test-split 0.05 \
+    --output ./artifacts/processed \
+    --output-corpus ./artifacts/corpus.txt \
     --min-line-length 10
+
+slim-train-tokenizer \
+    --input ./artifacts/corpus.txt \
+    --output ./artifacts/tokenizer \
+    --model-prefix tokenizer \
+    --vocab-size 16000
+
+slim-tokenize-parallel \
+    --input ./artifacts/corpus.txt \
+    --model ./artifacts/tokenizer/tokenizer.model \
+    --output ./artifacts/tokens.txt \
+    --workers 8
 ```
 
 ---
@@ -492,7 +367,7 @@ slim-prepare-data \
 ### 1. Configuration Recommendation
 
 ```bash
-slim-recommend --data-dir ./data
+slim-recommend ./results/SLiM-CZ-V1-Dataset ./cfg
 ```
 
 Analyzes your dataset and provides:
@@ -502,21 +377,13 @@ Analyzes your dataset and provides:
 - Training time estimate
 - Custom config generation if needed
 
-### 2. Model Diagnosis
+### 2. Pipeline Compatibility Check
 
-```bash
-slim-diagnose \
-    ./output/best_model.pt \
-    ./data/tokenizer.model \
-    ./data
-```
+`slim-train` now validates compatibility before training starts:
 
-Performs comprehensive checks:
-- ✓ Checkpoint integrity (epoch, loss, weights)
-- ✓ Tokenizer quality (vocab size, Czech encoding)
-- ✓ Training data statistics
-- ✓ Generation test with sample prompts
-- ✓ Identifies common issues (untrained model, high loss, etc.)
+- ✓ reads `tokens.txt.meta.json` generated by `slim-tokenize-parallel`
+- ✓ compares tokenizer vocabulary size with `model.vocab_size` in config
+- ✓ fails early with actionable message on mismatch
 
 ---
 
@@ -638,9 +505,8 @@ Based on Chinchilla scaling and empirical results:
 ### Model generates only unknown tokens (⇧)
 
 **Diagnosis:**
-```bash
-slim-diagnose model.pt tokenizer.model data/
-```
+- Check that `tokens.txt.meta.json` exists.
+- Check that `model.vocab_size` in YAML matches tokenizer vocabulary.
 
 **Common causes:**
 - Model not trained (epoch 0)
@@ -677,7 +543,7 @@ slim-diagnose model.pt tokenizer.model data/
 2. Use larger model if you have enough data
 3. Collect more training data (target 2-5M tokens)
 4. Adjust generation parameters (temperature, top_k)
-5. Check tokenizer quality with `slim-diagnose`
+5. Re-run tokenization and ensure compatible `vocab_size`
 
 ---
 
