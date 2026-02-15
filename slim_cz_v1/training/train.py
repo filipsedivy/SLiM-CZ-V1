@@ -112,7 +112,7 @@ def load_tokenized_data(
             all_tokens.extend(tokens)
             line_count += 1
 
-            if line_count % 10000 == 0:
+            if line_count % 1_000_000 == 0:
                 console.heartbeat(f"Read {line_count} lines...")
 
     console.verbose(f"Loaded {len(all_tokens):,} tokens from {line_count:,} lines")
