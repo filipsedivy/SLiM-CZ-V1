@@ -63,6 +63,12 @@ try:
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
 
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+
 
 # ============================================================================
 # CONSTANTS
@@ -408,7 +414,8 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
         model_path,
         temp_dir,
         write_buffer_size,
-        compress_output
+        compress_output,
+        output_format
     ) = args
 
     start_time = time.time()
@@ -419,8 +426,8 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
         sp.Load(model_path)
 
         # Prepare output file
-        output_filename = f"chunk_{chunk_spec.chunk_id:08d}.txt"
-        if compress_output:
+        output_filename = f"chunk_{chunk_spec.chunk_id:08d}.{output_format}"
+        if compress_output and output_format == 'text':
             output_filename += ".gz"
         output_path = os.path.join(temp_dir, output_filename)
 
@@ -442,26 +449,50 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
         num_tokens = 0
         write_buffer = []
 
-        open_func = gzip.open if compress_output else open
-        mode = 'wt' if compress_output else 'w'
-
-        with open_func(output_path, mode, encoding='utf-8') as out_f:
+        if output_format == 'bin':
+            # Binary mode - collect all tokens then write as numpy array
+            all_token_ids = []
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
-
                 token_ids = sp.EncodeAsIds(line)
-                write_buffer.append(' '.join(map(str, token_ids)))
+                all_token_ids.extend(token_ids)
                 num_lines += 1
                 num_tokens += len(token_ids)
+            
+            # Use uint16 if vocab size < 65535, else uint32
+            vocab_size = sp.GetPieceSize()
+            dtype = np.uint16 if vocab_size < 65535 else np.uint32
+            
+            if all_token_ids:
+                np_tokens = np.array(all_token_ids, dtype=dtype)
+                np_tokens.tofile(output_path)
+            else:
+                # Create empty file
+                open(output_path, 'wb').close()
+        else:
+            # Text mode
+            open_func = gzip.open if compress_output else open
+            mode = 'wt' if compress_output else 'w'
 
-                if len(write_buffer) >= write_buffer_size:
+            with open_func(output_path, mode, encoding='utf-8') as out_f:
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    token_ids = sp.EncodeAsIds(line)
+                    write_buffer.append(' '.join(map(str, token_ids)))
+                    num_lines += 1
+                    num_tokens += len(token_ids)
+
+                    if len(write_buffer) >= write_buffer_size:
+                        out_f.write('\n'.join(write_buffer) + '\n')
+                        write_buffer.clear()
+
+                if write_buffer:
                     out_f.write('\n'.join(write_buffer) + '\n')
-                    write_buffer.clear()
-
-            if write_buffer:
-                out_f.write('\n'.join(write_buffer) + '\n')
 
         processing_time = time.time() - start_time
 
@@ -521,6 +552,7 @@ class ParallelTokenizer:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         write_buffer_size: int = DEFAULT_WRITE_BUFFER_SIZE,
         compress_temp: bool = False,
+        output_format: str = 'text',
         quiet: bool = False,
         debug: bool = False,
         log_file: Optional[Path] = None,
@@ -535,6 +567,7 @@ class ParallelTokenizer:
             chunk_size: Lines per processing chunk (default: 50000)
             write_buffer_size: Lines to buffer before disk write (default: 10000)
             compress_temp: Gzip compress temporary files (saves disk, costs CPU)
+            output_format: Output format ('text' or 'bin') (default: 'text')
             quiet: Suppress all console output
             debug: Enable debug-level logging
             log_file: Path to write detailed log file
@@ -543,6 +576,11 @@ class ParallelTokenizer:
         if not SENTENCEPIECE_AVAILABLE:
             raise ImportError(
                 "SentencePiece is required. Install with: pip install sentencepiece"
+            )
+
+        if output_format == 'bin' and not NUMPY_AVAILABLE:
+            raise ImportError(
+                "Numpy is required for binary output. Install with: pip install numpy"
             )
 
         self.model_path = Path(model_path).resolve()
@@ -567,6 +605,7 @@ class ParallelTokenizer:
         self.chunk_size = chunk_size
         self.write_buffer_size = write_buffer_size
         self.compress_temp = compress_temp
+        self.output_format = output_format
 
         # Logging
         log_level = logging.DEBUG if debug else logging.INFO
@@ -598,6 +637,7 @@ class ParallelTokenizer:
         self.logger.info(f"Worker processes:  {self.num_workers}")
         self.logger.info(f"Chunk size:        {self.chunk_size:,} lines")
         self.logger.info(f"Write buffer:      {self.write_buffer_size:,} lines")
+        self.logger.info(f"Output format:     {self.output_format}")
         self.logger.info(f"Compress temp:     {self.compress_temp}")
         if self.checkpoint_dir:
             self.logger.info(f"Checkpoint dir:    {self.checkpoint_dir}")
@@ -759,7 +799,8 @@ class ParallelTokenizer:
                 str(self.model_path),
                 str(self._temp_dir),
                 self.write_buffer_size,
-                self.compress_temp
+                self.compress_temp,
+                self.output_format
             )
             for chunk in chunks
         ]
@@ -838,32 +879,45 @@ class ParallelTokenizer:
         total_tokens = 0
         merged = 0
 
-        with open(output_path, 'w', encoding='utf-8') as out_f:
+        mode = 'wb' if self.output_format == 'bin' else 'w'
+        encoding = None if self.output_format == 'bin' else 'utf-8'
+
+        with open(output_path, mode, encoding=encoding) as out_f:
             for chunk_id in range(total_chunks):
-                filename = f"chunk_{chunk_id:08d}.txt"
+                ext = self.output_format
+                filename = f"chunk_{chunk_id:08d}.{ext}"
                 chunk_path = self._temp_dir / filename
 
                 if not chunk_path.exists():
-                    chunk_path = self._temp_dir / (filename + ".gz")
+                    if self.output_format == 'text':
+                        chunk_path = self._temp_dir / (filename + ".gz")
 
                 if not chunk_path.exists():
                     self.logger.warning(f"Missing chunk {chunk_id}")
                     continue
 
-                open_func = gzip.open if chunk_path.suffix == '.gz' else open
-                mode = 'rt' if chunk_path.suffix == '.gz' else 'r'
+                if self.output_format == 'bin':
+                    # Binary merge: just copy bytes
+                    with open(chunk_path, 'rb') as in_f:
+                        shutil.copyfileobj(in_f, out_f)
+                    # We can't easily count lines/tokens in binary mode without reading
+                    # but we already collected them in worker results
+                else:
+                    # Text merge
+                    open_func = gzip.open if chunk_path.suffix == '.gz' else open
+                    mode = 'rt' if chunk_path.suffix == '.gz' else 'r'
 
-                with open_func(chunk_path, mode, encoding='utf-8') as in_f:
-                    for line in in_f:
-                        out_f.write(line)
-                        total_lines += 1
-                        total_tokens += len(line.strip().split())
+                    with open_func(chunk_path, mode, encoding='utf-8') as in_f:
+                        for line in in_f:
+                            out_f.write(line)
+                            total_lines += 1
+                            total_tokens += len(line.strip().split())
 
                 chunk_path.unlink()
                 merged += 1
 
                 if show_progress and merged % 50 == 0:
-                    self.logger.progress(merged, total_chunks, "")
+                    self.logger.progress(merged, total_chunks, "| Merging")
 
         if show_progress:
             self.logger.progress_done()
@@ -1006,7 +1060,8 @@ class ShardProcessor:
         quiet: bool = False,
         debug: bool = False,
         log_file: Optional[Path] = None,
-        checkpoint_dir: Optional[Path] = None
+        checkpoint_dir: Optional[Path] = None,
+        output_format: str = 'text'
     ):
         """
         Initialize shard processor.
@@ -1018,13 +1073,19 @@ class ShardProcessor:
             debug: Enable debug logging
             log_file: Path to log file
             checkpoint_dir: Directory for checkpoints (enables resume)
+            output_format: Output format ('text' or 'bin') (default: 'text')
         """
         if not SENTENCEPIECE_AVAILABLE:
             raise ImportError("SentencePiece required: pip install sentencepiece")
 
+        if output_format == 'bin' and not NUMPY_AVAILABLE:
+            raise ImportError("Numpy required for binary: pip install numpy")
+
         self.model_path = Path(model_path).resolve()
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model not found: {self.model_path}")
+
+        self.output_format = output_format
 
         # Validate model
         try:
@@ -1225,15 +1286,16 @@ class ShardProcessor:
         worker_args = []
         for i, shard in enumerate(shards):
             if output_dir:
-                out_path = output_dir / f"{shard.stem}.tokens.txt"
+                out_path = output_dir / f"{shard.stem}.{self.output_format}"
             else:
-                out_path = temp_dir / f"{shard.stem}.tokens.txt"
+                out_path = temp_dir / f"{shard.stem}.{self.output_format}"
 
             worker_args.append((
                 str(shard),
                 str(out_path),
                 str(self.model_path),
-                10000  # write buffer
+                10000,  # write buffer
+                self.output_format
             ))
 
         results = []
@@ -1310,20 +1372,24 @@ class ShardProcessor:
             for i, shard in enumerate(shards):
                 # Find the output file
                 if output_dir:
-                    shard_output = output_dir / f"{shard.stem}.tokens.txt"
+                    shard_output = output_dir / f"{shard.stem}.{self.output_format}"
                 else:
-                    shard_output = temp_dir / f"{shard.stem}.tokens.txt"
+                    shard_output = temp_dir / f"{shard.stem}.{self.output_format}"
 
                 if not shard_output.exists():
                     self.logger.warning(f"Missing output for {shard.name}")
                     continue
 
                 # Stream copy
-                with open(shard_output, 'r', encoding='utf-8') as in_f:
-                    for line in in_f:
-                        out_f.write(line)
-                        total_lines += 1
-                        total_tokens += len(line.strip().split())
+                if self.output_format == 'bin':
+                    with open(shard_output, 'rb') as in_f:
+                        shutil.copyfileobj(in_f, out_f)
+                else:
+                    with open(shard_output, 'r', encoding='utf-8') as in_f:
+                        for line in in_f:
+                            out_f.write(line)
+                            total_lines += 1
+                            total_tokens += len(line.strip().split())
 
                 if show_progress and (i + 1) % 10 == 0:
                     self.logger.progress(i + 1, len(shards), "")
@@ -1367,7 +1433,7 @@ class ShardProcessor:
         completed = []
         for r in results:
             if r.output_path:
-                name = Path(r.output_path).stem.replace('.tokens', '')
+                name = Path(r.output_path).stem
                 completed.append(name)
 
         data = {
@@ -1381,7 +1447,7 @@ class ShardProcessor:
 
 def _process_shard_worker(args: Tuple) -> ChunkResult:
     """Worker function for processing a single shard file."""
-    input_path, output_path, model_path, write_buffer_size = args
+    input_path, output_path, model_path, write_buffer_size, output_format = args
 
     start_time = time.time()
     input_path = Path(input_path)
@@ -1396,24 +1462,46 @@ def _process_shard_worker(args: Tuple) -> ChunkResult:
         num_tokens = 0
         write_buffer = []
 
-        with open(output_path, 'w', encoding='utf-8') as out_f:
+        if output_format == 'bin':
+            all_token_ids = []
             with open(input_path, 'r', encoding='utf-8') as in_f:
                 for line in in_f:
                     line = line.strip()
                     if not line:
                         continue
-
                     token_ids = sp.EncodeAsIds(line)
-                    write_buffer.append(' '.join(map(str, token_ids)))
+                    all_token_ids.extend(token_ids)
                     num_lines += 1
                     num_tokens += len(token_ids)
 
-                    if len(write_buffer) >= write_buffer_size:
-                        out_f.write('\n'.join(write_buffer) + '\n')
-                        write_buffer.clear()
+            # Use uint16 if vocab size < 65535, else uint32
+            vocab_size = sp.GetPieceSize()
+            dtype = np.uint16 if vocab_size < 65535 else np.uint32
+            
+            if all_token_ids:
+                np_tokens = np.array(all_token_ids, dtype=dtype)
+                np_tokens.tofile(output_path)
+            else:
+                open(output_path, 'wb').close()
+        else:
+            with open(output_path, 'w', encoding='utf-8') as out_f:
+                with open(input_path, 'r', encoding='utf-8') as in_f:
+                    for line in in_f:
+                        line = line.strip()
+                        if not line:
+                            continue
 
-            if write_buffer:
-                out_f.write('\n'.join(write_buffer) + '\n')
+                        token_ids = sp.EncodeAsIds(line)
+                        write_buffer.append(' '.join(map(str, token_ids)))
+                        num_lines += 1
+                        num_tokens += len(token_ids)
+
+                        if len(write_buffer) >= write_buffer_size:
+                            out_f.write('\n'.join(write_buffer) + '\n')
+                            write_buffer.clear()
+
+                if write_buffer:
+                    out_f.write('\n'.join(write_buffer) + '\n')
 
         return ChunkResult(
             chunk_id=0,

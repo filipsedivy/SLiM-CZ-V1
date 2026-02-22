@@ -4,6 +4,7 @@ from typing import List, Tuple, Dict
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
 
 
 class LanguageModelDataset(Dataset):
@@ -32,6 +33,65 @@ class LanguageModelDataset(Dataset):
         # Autoregressive: input[t] predicts label[t+1]
         input_ids = torch.tensor(seq[:-1], dtype=torch.long)
         labels = torch.tensor(seq[1:], dtype=torch.long)
+        
+        return input_ids, labels
+
+
+class MemmapDataset(Dataset):
+    """Memory-mapped dataset for large-scale training."""
+
+    def __init__(self, bin_path: Path, seq_len: int, dtype=np.uint16):
+        """
+        Args:
+            bin_path: Path to binary token file
+            seq_len: Sequence length
+            dtype: Data type of tokens (default: uint16)
+        """
+        self.bin_path = Path(bin_path)
+        self.seq_len = seq_len
+        self.dtype = dtype
+
+        # Memory map the file
+        self.data = np.memmap(self.bin_path, dtype=self.dtype, mode='r')
+        
+        # Calculate number of sequences
+        # Each sequence needs seq_len + 1 tokens for input/label shift
+        self.num_sequences = len(self.data) // seq_len
+        
+        # Trim data to exact multiple of seq_len
+        self.data = self.data[:self.num_sequences * seq_len]
+
+    def __len__(self) -> int:
+        return self.num_sequences
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get training example.
+        
+        Returns:
+            input_ids: Input tokens (seq_len)
+            labels: Target tokens (seq_len) - shifted by 1
+        """
+        # For language modeling, we usually want to predict next token.
+        # If we have a flat stream of tokens, we can take a window.
+        
+        start_idx = idx * self.seq_len
+        end_idx = start_idx + self.seq_len
+        
+        # Ensure we don't go out of bounds for labels (which needs +1)
+        if end_idx >= len(self.data):
+             # Wrap around or handle end
+             start_idx = 0
+             end_idx = self.seq_len
+             
+        chunk = self.data[start_idx:end_idx+1]
+        
+        # If we don't have enough for labels, pad or wrap
+        if len(chunk) < self.seq_len + 1:
+            chunk = np.concatenate([chunk, self.data[:self.seq_len + 1 - len(chunk)]])
+
+        input_ids = torch.from_numpy(chunk[:-1].astype(np.int64))
+        labels = torch.from_numpy(chunk[1:].astype(np.int64))
         
         return input_ids, labels
 

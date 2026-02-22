@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+import numpy as np
 
 from ..utils import console
 
@@ -98,48 +99,79 @@ def load_tokenized_data(
         seq_len: int,
         vocab_size: int,
         val_split: float = 0.1
-) -> Tuple[SequenceDataset, SequenceDataset, Dict]:
+) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, Dict]:
     """Load tokenized data and prepare sequences."""
 
     console.verbose(f"Loading tokenized data from: {tokens_path}")
 
-    all_tokens = []
-    line_count = 0
+    # Detect binary format
+    if tokens_path.suffix == '.bin':
+        from ..dataloader import MemmapDataset
+        
+        # Determine dtype from vocab size
+        dtype = np.uint16 if vocab_size < 65535 else np.uint32
+        
+        dataset = MemmapDataset(tokens_path, seq_len, dtype=dtype)
+        
+        # Calculate split
+        total_size = len(dataset)
+        val_size = int(total_size * val_split)
+        train_size = total_size - val_size
+        
+        # Split using Subset
+        train_dataset = torch.utils.data.Subset(dataset, range(train_size))
+        val_dataset = torch.utils.data.Subset(dataset, range(train_size, total_size))
+        
+        stats = {
+            'vocab_size': vocab_size,
+            'seq_len': seq_len,
+            'train_sequences': train_size,
+            'val_sequences': val_size,
+            'total_tokens': len(dataset.data),
+            'train_tokens': train_size * seq_len,
+            'val_tokens': val_size * seq_len,
+            'mode': 'memmap'
+        }
+    else:
+        # Legacy text loading
+        all_tokens = []
+        line_count = 0
 
-    with open(tokens_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            tokens = [int(t) for t in line.strip().split()]
-            all_tokens.extend(tokens)
-            line_count += 1
+        with open(tokens_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                tokens = [int(t) for t in line.strip().split()]
+                all_tokens.extend(tokens)
+                line_count += 1
 
-            if line_count % 1_000_000 == 0:
-                console.heartbeat(f"Read {line_count} lines...")
+                if line_count % 1_000_000 == 0:
+                    console.heartbeat(f"Read {line_count} lines...")
 
-    console.verbose(f"Loaded {len(all_tokens):,} tokens from {line_count:,} lines")
+        console.verbose(f"Loaded {len(all_tokens):,} tokens from {line_count:,} lines")
 
-    num_sequences = len(all_tokens) // seq_len
-    tokens_trimmed = all_tokens[:num_sequences * seq_len]
+        num_sequences = len(all_tokens) // seq_len
+        tokens_trimmed = all_tokens[:num_sequences * seq_len]
 
-    sequences = torch.tensor(tokens_trimmed, dtype=torch.long).reshape(num_sequences, seq_len)
+        sequences = torch.tensor(tokens_trimmed, dtype=torch.long).reshape(num_sequences, seq_len)
 
-    val_size = int(num_sequences * val_split)
-    train_size = num_sequences - val_size
+        val_size = int(num_sequences * val_split)
+        train_size = num_sequences - val_size
 
-    train_sequences = sequences[:train_size]
-    val_sequences = sequences[train_size:]
+        train_sequences = sequences[:train_size]
+        val_sequences = sequences[train_size:]
 
-    train_dataset = SequenceDataset(train_sequences)
-    val_dataset = SequenceDataset(val_sequences)
+        train_dataset = SequenceDataset(train_sequences)
+        val_dataset = SequenceDataset(val_sequences)
 
-    stats = {
-        'vocab_size': vocab_size,
-        'seq_len': seq_len,
-        'train_sequences': len(train_sequences),
-        'val_sequences': len(val_sequences),
-        'total_tokens': len(all_tokens),
-        'train_tokens': len(train_sequences) * seq_len,
-        'val_tokens': len(val_sequences) * seq_len,
-    }
+        stats = {
+            'vocab_size': vocab_size,
+            'seq_len': seq_len,
+            'train_sequences': len(train_sequences),
+            'val_sequences': len(val_sequences),
+            'total_tokens': len(all_tokens),
+            'train_tokens': len(train_sequences) * seq_len,
+            'val_tokens': len(val_sequences) * seq_len,
+            'mode': 'memory'
+        }
 
     console.verbose(f"Train: {stats['train_sequences']:,} | Val: {stats['val_sequences']:,} sequences")
 

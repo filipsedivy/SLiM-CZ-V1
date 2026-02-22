@@ -12,7 +12,8 @@ For TB-scale files:
     slim-tokenize-parallel \\
         --input corpus.txt \\
         --model tokenizer.model \\
-        --output tokens.txt \\
+        --output tokens.bin \\
+        --format bin \\
         --workers 32 \\
         --chunk-size 100000 \\
         --checkpoint-dir ./checkpoints \\
@@ -60,8 +61,8 @@ def _write_tokenization_metadata(
         'mode': mode,
         'tokenizer_model': str(model_path.resolve()),
         'tokenizer_vocab_size': int(sp.GetPieceSize()),
-        'total_tokens': int(stats.get('total_tokens', 0)),
         'total_lines': int(stats.get('total_lines', 0)),
+        'output_format': stats.get('output_format', 'text'),
         'token_file': str(output_path.resolve()),
     }
 
@@ -221,6 +222,14 @@ Recommended Settings by Total Size:
     )
 
     # Output options
+    parser.add_argument(
+        '--format',
+        type=str,
+        choices=['text', 'bin'],
+        default='text',
+        help='Output format: "text" for space-separated IDs, "bin" for raw numpy binary (recommended for 1TB+)'
+    )
+
     parser.add_argument(
         '--compress-temp',
         action='store_true',
@@ -417,6 +426,7 @@ Recommended Settings by Total Size:
                 chunk_size=args.chunk_size,
                 write_buffer_size=args.write_buffer,
                 compress_temp=args.compress_temp,
+                output_format=args.format,
                 quiet=args.quiet,
                 debug=args.debug,
                 log_file=log_file,
@@ -429,6 +439,8 @@ Recommended Settings by Total Size:
                 resume=not args.no_resume,
                 show_progress=not args.quiet
             )
+            # Add format to stats for metadata
+            stats['output_format'] = args.format
             failed_key = 'failed_chunks'
 
         # Final summary
