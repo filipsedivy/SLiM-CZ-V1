@@ -108,8 +108,9 @@ def load_tokenized_data(
     if tokens_path.suffix == '.bin':
         from ..dataloader import MemmapDataset
         
-        # Determine dtype from vocab size
-        dtype = np.uint16 if vocab_size < 65535 else np.uint32
+        # Determine dtype from vocab size (uint16 max is 65535)
+        # If vocab_size is 65536, max ID is 65535, which fits in uint16
+        dtype = np.uint16 if vocab_size <= 65536 else np.uint32
         
         dataset = MemmapDataset(tokens_path, seq_len, dtype=dtype)
         

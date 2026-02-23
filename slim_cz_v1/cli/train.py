@@ -61,8 +61,10 @@ def _validate_pipeline_compatibility(config: dict, tokens_path: Path) -> None:
             "Use matching --vocab-size during tokenizer training and matching config, then re-tokenize."
         )
 
+    format_info = f" (format: {meta.get('output_format', 'text')})" if meta else ""
     console.info(
-        f"Compatibility check passed: tokenized vocab_size={token_vocab} matches config vocab_size={config_vocab}."
+        f"Compatibility check passed: tokenized vocab_size={token_vocab} matches "
+        f"config vocab_size={config_vocab}{format_info}."
     )
 
 def parse_args():
