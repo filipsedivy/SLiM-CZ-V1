@@ -139,6 +139,19 @@ Environment variables:
         help='Disable TensorBoard logging'
     )
 
+    # Checkpoint / resume
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Resume training from latest checkpoint in output directory'
+    )
+    parser.add_argument(
+        '--resume-from',
+        type=Path,
+        default=None,
+        help='Resume from a specific checkpoint file path'
+    )
+
     return parser.parse_args()
 
 
@@ -201,7 +214,11 @@ def main():
     # Run training
     try:
         final_result = None
-        for progress in trainer.train(args.tokens, seq_len, vocab_size):
+        for progress in trainer.train(
+            args.tokens, seq_len, vocab_size,
+            resume=args.resume,
+            resume_from=str(args.resume_from) if args.resume_from else None
+        ):
             if progress.get('final'):
                 final_result = progress
                 break

@@ -155,6 +155,42 @@ slim-train \
 
 > `slim-train` now performs an early compatibility check between tokenizer vocabulary (from `tokens.txt.meta.json`) and `model.vocab_size` in your YAML config. If they do not match, training stops with a clear error before wasting GPU/CPU time.
 
+#### Resuming interrupted training
+
+Training saves a checkpoint after every epoch (configurable). If training is interrupted (timeout, crash, Ctrl+C), resume seamlessly:
+
+```bash
+# Resume from latest checkpoint in output directory
+slim-train \
+  --config ./cfg/slim_cz_v1_default.yaml \
+  --tokens ./artifacts/tokens.txt \
+  --output ./output \
+  --resume
+
+# Or resume from a specific checkpoint file
+slim-train \
+  --config ./cfg/slim_cz_v1_default.yaml \
+  --tokens ./artifacts/tokens.txt \
+  --output ./output \
+  --resume-from ./output/checkpoint_epoch_5.pt
+```
+
+The full training state is restored — model weights, optimizer momentum, learning rate schedule, RNG state, and best validation metrics. Training continues as if it was never interrupted.
+
+> **Jupyter Notebook / Kaggle**: If your compute instance has a time limit, simply re-run the training cell with `resume=True` and the same output directory. See **Python API** below.
+
+**Python API:**
+
+```python
+from slim_cz_v1.training import Trainer
+
+trainer = Trainer(config, output_dir="./output")
+
+# First run (or resumed run)
+for progress in trainer.train(tokens_path, seq_len, vocab_size, resume=True):
+    print(f"Epoch {progress['epoch']}: PPL={progress['val_perplexity']:.2f}")
+```
+
 ### 5) Inference
 
 ```bash
@@ -203,6 +239,11 @@ train:
   scheduler: cosine
   gradient_clip: 1.0
   label_smoothing: 0.1   # Prevents overconfidence
+  checkpoint:
+    enabled: true          # Save checkpoints
+    save_every_epochs: 1   # Save every N epochs
+    keep_last_k: 3         # Keep only last 3 checkpoints
+    resume_from: null      # Explicit checkpoint path (optional)
   
 generation:
   max_new_tokens: 100
@@ -535,6 +576,14 @@ Based on Chinchilla scaling and empirical results:
 3. Use smaller model
 4. Add more training data
 5. Enable early stopping (default)
+
+### Training interrupted (timeout, crash)
+
+**Solutions:**
+1. Re-run with `--resume` flag: `slim-train --config ... --tokens ... --output ./output --resume`
+2. In Jupyter: pass `resume=True` to `trainer.train()`
+3. All state (weights, optimizer, scheduler, RNG) is restored automatically
+4. Old checkpoints are pruned automatically (`keep_last_k: 3`)
 
 ### Poor generation quality
 

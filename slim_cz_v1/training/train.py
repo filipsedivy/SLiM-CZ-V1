@@ -8,9 +8,12 @@ Provides training infrastructure including:
 - Checkpoint management
 """
 
+import glob
+import os
+import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Any, Tuple, Iterator
+from typing import Dict, Any, Optional, Tuple, Iterator
 
 import torch
 import torch.nn as nn
@@ -426,11 +429,16 @@ class Trainer:
             self,
             model: nn.Module,
             optimizer: torch.optim.Optimizer,
+            scheduler: torch.optim.lr_scheduler._LRScheduler,
             epoch: int,
             global_step: int,
             is_best: bool = False
     ):
-        """Save model checkpoint."""
+        """Save model checkpoint with full training state.
+
+        Uses atomic writes (temp file + rename) to prevent corruption
+        on crash. Prunes old checkpoints according to keep_last_k.
+        """
 
         console.verbose(f"Saving checkpoint epoch {epoch} (best={is_best})")
 
@@ -439,28 +447,134 @@ class Trainer:
             'global_step': global_step,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'config': self.config,
             'best_val_loss': self.best_val_loss,
             'best_val_perplexity': self.best_val_perplexity,
+            'torch_rng_state': torch.get_rng_state(),
+            'numpy_rng_state': np.random.get_state(),
         }
 
+        if torch.cuda.is_available():
+            checkpoint['cuda_rng_state'] = torch.cuda.get_rng_state()
+
         checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch}.pt'
-        torch.save(checkpoint, checkpoint_path)
+
+        # Atomic write: save to temp file first, then rename
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.output_dir), suffix='.pt.tmp'
+        )
+        try:
+            os.close(fd)
+            torch.save(checkpoint, tmp_path)
+            os.replace(tmp_path, str(checkpoint_path))
+        except BaseException:
+            # Clean up temp file on any failure
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
         if is_best:
             best_path = self.output_dir / 'best_model.pt'
-            torch.save(checkpoint, best_path)
+            fd, tmp_best = tempfile.mkstemp(
+                dir=str(self.output_dir), suffix='.pt.tmp'
+            )
+            try:
+                os.close(fd)
+                torch.save(checkpoint, tmp_best)
+                os.replace(tmp_best, str(best_path))
+            except BaseException:
+                if os.path.exists(tmp_best):
+                    os.remove(tmp_best)
+                raise
+
+        # Prune old checkpoints
+        ckpt_cfg = self.config.get('train', {}).get('checkpoint', {})
+        keep_last_k = ckpt_cfg.get('keep_last_k', 3)
+        if keep_last_k > 0:
+            self._prune_checkpoints(keep_last_k)
+
+    def _prune_checkpoints(self, keep_last_k: int):
+        """Delete oldest checkpoint files, keeping only the last k."""
+        pattern = str(self.output_dir / 'checkpoint_epoch_*.pt')
+        existing = sorted(glob.glob(pattern))
+        # Never prune best_model.pt (it's a separate file)
+        if len(existing) > keep_last_k:
+            to_delete = existing[:-keep_last_k]
+            for path in to_delete:
+                console.verbose(f"Pruning old checkpoint: {Path(path).name}")
+                os.remove(path)
+
+    def load_checkpoint(
+            self,
+            checkpoint_path: Optional[Path] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Load a checkpoint for resume.
+
+        Args:
+            checkpoint_path: Explicit path. If None, auto-detects the
+                             latest checkpoint_epoch_*.pt in output_dir.
+
+        Returns:
+            Checkpoint dict, or None if no checkpoint found.
+        """
+
+        if checkpoint_path is not None:
+            path = Path(checkpoint_path)
+            if not path.exists():
+                console.error(f"Checkpoint not found: {path}")
+                return None
+        else:
+            # Auto-detect latest checkpoint
+            pattern = str(self.output_dir / 'checkpoint_epoch_*.pt')
+            existing = sorted(glob.glob(pattern))
+            if not existing:
+                console.warning("No checkpoint found in output directory for resume.")
+                return None
+            path = Path(existing[-1])
+
+        console.info(f"Loading checkpoint: {path.name}")
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+
+        # Validate config compatibility
+        saved_model_cfg = checkpoint.get('config', {}).get('model', {})
+        current_model_cfg = self.config.get('model', {})
+
+        for key in ('vocab_size', 'd_model', 'num_layers', 'num_heads'):
+            saved_val = saved_model_cfg.get(key)
+            current_val = current_model_cfg.get(key)
+            if saved_val is not None and current_val is not None and saved_val != current_val:
+                console.error(
+                    f"Config mismatch on '{key}': checkpoint={saved_val}, "
+                    f"current={current_val}. Cannot resume."
+                )
+                return None
+
+        console.info(
+            f"Checkpoint loaded: epoch {checkpoint['epoch']}, "
+            f"global_step {checkpoint['global_step']}"
+        )
+        return checkpoint
 
     def train(
             self,
             tokens_path: Path,
             seq_len: int,
-            vocab_size: int
+            vocab_size: int,
+            resume: bool = False,
+            resume_from: Optional[str] = None
     ) -> Iterator[Dict[str, Any]]:
         """
         Main training loop.
 
         Yields progress dictionaries for each epoch.
+
+        Args:
+            tokens_path: Path to tokenized data
+            seq_len: Sequence length
+            vocab_size: Vocabulary size
+            resume: If True, resume from latest checkpoint in output_dir
+            resume_from: Explicit checkpoint path (overrides auto-detect)
         """
 
         console.header("SLiM-CZ-V1 Training")
@@ -521,13 +635,65 @@ class Trainer:
 
         scheduler = LambdaLR(optimizer, lr_lambda)
 
-        # Training loop
+        # Resume from checkpoint
+        start_epoch = 1
         global_step = 0
+
+        # Check config-level resume_from
+        ckpt_cfg = self.config.get('train', {}).get('checkpoint', {})
+        config_resume_from = ckpt_cfg.get('resume_from')
+        if config_resume_from and not resume_from:
+            resume_from = config_resume_from
+            resume = True
+
+        if resume or resume_from:
+            checkpoint_path = Path(resume_from) if resume_from else None
+            ckpt = self.load_checkpoint(checkpoint_path)
+
+            if ckpt is not None:
+                model.load_state_dict(ckpt['model_state_dict'])
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+                if 'scheduler_state_dict' in ckpt:
+                    scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+
+                start_epoch = ckpt['epoch'] + 1
+                global_step = ckpt['global_step']
+                self.best_val_loss = ckpt.get('best_val_loss', float('inf'))
+                self.best_val_perplexity = ckpt.get('best_val_perplexity', float('inf'))
+
+                # Restore RNG states for reproducibility
+                if 'torch_rng_state' in ckpt:
+                    torch.set_rng_state(ckpt['torch_rng_state'])
+                if 'numpy_rng_state' in ckpt:
+                    np.random.set_state(ckpt['numpy_rng_state'])
+                if 'cuda_rng_state' in ckpt and torch.cuda.is_available():
+                    torch.cuda.set_rng_state(ckpt['cuda_rng_state'])
+
+                console.success(
+                    f"Resumed from epoch {ckpt['epoch']}. "
+                    f"Continuing from epoch {start_epoch}/{self.epochs}."
+                )
+            else:
+                console.warning("No checkpoint found. Starting training from scratch.")
+
+        if start_epoch > self.epochs:
+            console.warning(
+                f"Start epoch ({start_epoch}) exceeds total epochs ({self.epochs}). "
+                "Nothing to train."
+            )
+            return
+
+        # Checkpoint saving configuration
+        save_every = ckpt_cfg.get('save_every_epochs', 1)
+        checkpoint_enabled = ckpt_cfg.get('enabled', True)
+
+        # Training loop
         training_start = time.time()
 
         console.section("Training Progress")
 
-        for epoch in range(1, self.epochs + 1):
+        for epoch in range(start_epoch, self.epochs + 1):
             epoch_start = time.time()
 
             # Train
@@ -558,8 +724,11 @@ class Trainer:
             epoch_time = time.time() - epoch_start
 
             # Checkpoint
-            if epoch % 5 == 0 or is_best:
-                self.save_checkpoint(model, optimizer, epoch, global_step, is_best)
+            if checkpoint_enabled and (epoch % save_every == 0 or is_best):
+                self.save_checkpoint(
+                    model, optimizer, scheduler,
+                    epoch, global_step, is_best
+                )
 
             # Epoch summary
             metrics = {
@@ -583,7 +752,10 @@ class Trainer:
             }
 
         # Final
-        self.save_checkpoint(model, optimizer, self.epochs, global_step, is_best=False)
+        self.save_checkpoint(
+            model, optimizer, scheduler,
+            self.epochs, global_step, is_best=False
+        )
         self.tb_logger.close()
 
         total_time = time.time() - training_start
