@@ -201,6 +201,32 @@ slim-inference \
 
 ---
 
+## 📈 TensorBoard Monitoring
+
+SLiM-CZ-V1 features comprehensive TensorBoard integration to analyze model performance and training dynamics in real-time. To enable logging, make sure `use_tensorboard: true` is set in your configuration YAML file.
+
+### Starting TensorBoard
+
+```bash
+tensorboard --logdir ./output/tensorboard
+```
+Then open `http://localhost:6006` in your browser.
+
+### What is Logged?
+
+The logger records extensive data points for in-depth analysis:
+- **Metrics**: Loss and Perplexity for both Training and Validation sets. Track the gap between train and validation loss per epoch to monitor overfitting.
+- **Gradients**: L2 norms per layer and overall gradient total norms. Track the "pre-clip norm" and whether clipping occurred for stability insights.
+- **Weights**: Full histograms and statistics (mean, std, min, max) of model weights logged epoch-by-epoch.
+- **Time Performance**: Detailed tracking of single-batch durations and total epoch durations in seconds.
+- **Hyperparameters**: End-of-training hparams logging mapped directly against the model's best metrics.
+- **Info Panels**: Model architecture dimensions (params count), Checkpoint events, and Dataset statistics natively written to the TensorBoard Text tab.
+
+### Seamless Resumption
+When resuming training from a checkpoint (`--resume`), the logger automatically uses TensorBoard's `purge_step` functionality. This ensures that any orphaned events (e.g., from the crashed portion of an epoch) are safely overwritten, resulting in a single continuous and clean timeline.
+
+---
+
 ## ⚙️ Configuration System
 
 SLiM-CZ-V1 uses YAML configuration files optimized for different dataset sizes based on Chinchilla scaling laws.

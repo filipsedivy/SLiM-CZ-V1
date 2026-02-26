@@ -48,9 +48,16 @@ class TensorBoardLogger:
     def __init__(self, log_dir: Path, enabled: bool = True):
         self.enabled = enabled and HAS_TENSORBOARD
         self.writer = None
+        self.log_dir = log_dir
 
         if self.enabled:
             self.writer = SummaryWriter(log_dir=str(log_dir / 'tensorboard'))
+
+    def set_resume_step(self, global_step: int):
+        if self.enabled:
+            if self.writer:
+                self.writer.close()
+            self.writer = SummaryWriter(log_dir=str(self.log_dir / 'tensorboard'), purge_step=global_step)
 
     def log_metrics(self, metrics: Dict[str, float], step: int, prefix: str = ""):
         if not self.enabled:
@@ -69,6 +76,79 @@ class TensorBoardLogger:
             import yaml
             config_text = yaml.dump(config, default_flow_style=False)
             self.writer.add_text('Config/full_config', f"```yaml\n{config_text}\n```", 0)
+
+    def log_gradient_norms(self, model: nn.Module, step: int):
+        if not self.enabled:
+            return
+        total_norm = 0.0
+        for name, p in model.named_parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2).item()
+                self.writer.add_scalar(f"Gradients/{name}", param_norm, step)
+                total_norm += param_norm ** 2
+        total_norm = total_norm ** 0.5
+        self.writer.add_scalar("Gradients/Total_Norm", total_norm, step)
+
+    def log_weight_statistics(self, model: nn.Module, step: int):
+        if not self.enabled:
+            return
+        for name, p in model.named_parameters():
+            self.writer.add_histogram(f"Weights/{name}", p.data, step)
+            self.writer.add_scalar(f"WeightStats/{name}/mean", p.data.mean().item(), step)
+            self.writer.add_scalar(f"WeightStats/{name}/std", p.data.std().item(), step)
+            self.writer.add_scalar(f"WeightStats/{name}/min", p.data.min().item(), step)
+            self.writer.add_scalar(f"WeightStats/{name}/max", p.data.max().item(), step)
+
+    def log_epoch_metrics(self, metrics: Dict[str, float], epoch: int):
+        if not self.enabled:
+            return
+        for name, value in metrics.items():
+            tag = f"Epoch/{name}"
+            self.writer.add_scalar(tag, value, epoch)
+
+    def log_epoch_time(self, epoch_time: float, epoch: int):
+        if self.enabled:
+            self.writer.add_scalar('Time/Epoch_Duration_s', epoch_time, epoch)
+
+    def log_data_stats(self, stats: Dict[str, Any]):
+        if not self.enabled:
+            return
+        md = "### Dataset Statistics\n\n"
+        for k, v in stats.items():
+            md += f"- **{k}**: {v}\n"
+        self.writer.add_text('Info/Dataset', md, 0)
+
+    def log_model_info(self, model: nn.Module):
+        if not self.enabled:
+            return
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        md = f"### Model Architecture\n\n- **Total Parameters**: {total_params:,}\n- **Trainable**: {trainable_params:,}\n"
+        self.writer.add_text('Info/Model', md, 0)
+        
+    def log_hparams(self, config: Dict, final_metrics: Dict[str, float]):
+        if not self.enabled:
+            return
+        
+        def flatten_dict(d: dict, parent_key: str = '', sep: str = '.') -> dict:
+            items = []
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict):
+                    items.extend(flatten_dict(v, new_key, sep=sep).items())
+                else:
+                    if isinstance(v, (list, tuple)):
+                        items.append((new_key, str(v)))
+                    else:
+                        items.append((new_key, v))
+            return dict(items)
+            
+        flat_config = flatten_dict(config)
+        self.writer.add_hparams(flat_config, final_metrics)
+
+    def flush(self):
+        if self.enabled and self.writer:
+            self.writer.flush()
 
     def close(self):
         if self.enabled and self.writer:
@@ -345,6 +425,7 @@ class Trainer:
             labels = labels.to(self.device)
 
             # Forward
+            batch_start_time = time.time()
             logits, _ = model(input_ids)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
@@ -355,11 +436,21 @@ class Trainer:
             optimizer.zero_grad()
             loss.backward()
 
+            pre_clip_norm = 0.0
+            clip_occurred = False
             if self.gradient_clip > 0:
+                # Need to calculate pre-clip norm first to check if clipping occurred
+                parameters = [p for p in model.parameters() if p.grad is not None]
+                if parameters:
+                    pre_clip_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in parameters]), 2).item()
+                    clip_occurred = pre_clip_norm > self.gradient_clip
+
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip)
 
             optimizer.step()
             scheduler.step()
+            
+            batch_time = time.time() - batch_start_time
 
             total_loss += loss.item()
             global_step += 1
@@ -371,7 +462,11 @@ class Trainer:
                 self.tb_logger.log_metrics({
                     'loss': loss.item(),
                     'perplexity': torch.exp(loss).item(),
+                    'batch_time_s': batch_time,
+                    'clipping/pre_clip_norm': pre_clip_norm,
+                    'clipping/occurred': 1.0 if clip_occurred else 0.0
                 }, global_step, prefix='Training')
+                self.tb_logger.log_gradient_norms(model, global_step)
 
             # Progress reporting
             if use_progress_bar:
@@ -392,13 +487,15 @@ class Trainer:
     def evaluate(
             self,
             model: nn.Module,
-            val_loader: torch.utils.data.DataLoader
+            val_loader: torch.utils.data.DataLoader,
+            epoch: int = 0
     ) -> Tuple[float, float]:
         """Evaluate model on validation set."""
 
         model.eval()
         total_loss = 0
         num_batches = len(val_loader)
+        batch_losses = []
 
         console.verbose(f"Validation: {num_batches} batches")
 
@@ -412,11 +509,16 @@ class Trainer:
                     logits.view(-1, logits.size(-1)),
                     labels.view(-1)
                 )
-                total_loss += loss.item()
+                loss_val = loss.item()
+                total_loss += loss_val
+                batch_losses.append(loss_val)
 
                 # Heartbeat during validation
                 if batch_idx % 50 == 0:
                     console.heartbeat()
+
+        if self.tb_logger.enabled and epoch > 0:
+            self.tb_logger.writer.add_histogram('Validation/Batch_Losses', torch.tensor(batch_losses), epoch)
 
         avg_loss = total_loss / num_batches
         perplexity = torch.exp(torch.tensor(avg_loss)).item()
@@ -441,6 +543,8 @@ class Trainer:
         """
 
         console.verbose(f"Saving checkpoint epoch {epoch} (best={is_best})")
+        if self.tb_logger.enabled:
+            self.tb_logger.writer.add_text("Checkpoints", f"Saved checkpoint at epoch {epoch} (global_step {global_step}), is_best={is_best}", global_step)
 
         checkpoint = {
             'epoch': epoch,
@@ -605,6 +709,7 @@ class Trainer:
             'Sequence length': stats['seq_len'],
             'Vocabulary size': stats['vocab_size'],
         })
+        self.tb_logger.log_data_stats(stats)
 
         # Create dataloaders
         train_loader, val_loader = create_dataloaders(
@@ -620,6 +725,7 @@ class Trainer:
             params = model.count_parameters()
 
         console.info(f"Model parameters: {params['total']:,} ({params['trainable']:,} trainable)")
+        self.tb_logger.log_model_info(model)
 
         # Optimizer
         optimizer = AdamW(
@@ -670,6 +776,7 @@ class Trainer:
                 if 'cuda_rng_state' in ckpt and torch.cuda.is_available():
                     torch.cuda.set_rng_state(ckpt['cuda_rng_state'])
 
+                self.tb_logger.set_resume_step(global_step)
                 console.success(
                     f"Resumed from epoch {ckpt['epoch']}. "
                     f"Continuing from epoch {start_epoch}/{self.epochs}."
@@ -702,7 +809,7 @@ class Trainer:
             )
 
             # Evaluate
-            val_loss, val_ppl = self.evaluate(model, val_loader)
+            val_loss, val_ppl = self.evaluate(model, val_loader, epoch=epoch)
 
             # TensorBoard
             self.tb_logger.log_metrics({
@@ -713,7 +820,13 @@ class Trainer:
             self.tb_logger.log_metrics({
                 'val_loss': val_loss,
                 'val_perplexity': val_ppl,
+                'loss_gap': val_loss - train_loss,
             }, epoch, prefix='Epoch')
+
+            self.tb_logger.log_epoch_metrics({
+                'best_val_loss': self.best_val_loss,
+                'best_val_perplexity': self.best_val_perplexity,
+            }, epoch)
 
             # Best check
             is_best = val_loss < self.best_val_loss
@@ -722,6 +835,10 @@ class Trainer:
                 self.best_val_perplexity = val_ppl
 
             epoch_time = time.time() - epoch_start
+            
+            self.tb_logger.log_epoch_time(epoch_time, epoch)
+            self.tb_logger.log_weight_statistics(model, epoch)
+            self.tb_logger.flush()
 
             # Checkpoint
             if checkpoint_enabled and (epoch % save_every == 0 or is_best):
@@ -756,6 +873,12 @@ class Trainer:
             model, optimizer, scheduler,
             self.epochs, global_step, is_best=False
         )
+        
+        final_metrics = {
+            'hparam/best_val_loss': self.best_val_loss,
+            'hparam/best_val_perplexity': self.best_val_perplexity
+        }
+        self.tb_logger.log_hparams(self.config, final_metrics)
         self.tb_logger.close()
 
         total_time = time.time() - training_start
