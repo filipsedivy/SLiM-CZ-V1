@@ -258,7 +258,8 @@ class TextGenerator:
             top_p: float = 0.95,
             repetition_penalty: float = 1.2,
             do_sample: bool = True,
-            show_prompt: bool = True
+            show_prompt: bool = True,
+            stream_callback=None
     ) -> Dict[str, Any]:
         """
         Generate text from prompt.
@@ -282,6 +283,10 @@ class TextGenerator:
 
         # Track token history for repetition penalty
         generated_tokens = []
+        last_decoded_len = 0
+
+        if stream_callback and show_prompt:
+            stream_callback(prompt)
 
         start_time = time.time()
 
@@ -329,6 +334,13 @@ class TextGenerator:
                 # Append to sequence
                 input_tensor = torch.cat([input_tensor, next_token], dim=1)
                 generated_tokens.append(next_token.item())
+
+                if stream_callback:
+                    current_text = self.tokenizer.decode(generated_tokens)
+                    new_text = current_text[last_decoded_len:]
+                    if new_text:
+                        stream_callback(new_text)
+                        last_decoded_len = len(current_text)
 
                 # Stop at EOS token
                 if next_token.item() == self.tokenizer.eos_id():
@@ -436,6 +448,7 @@ class InteractiveMode:
         self.top_p = self.gen_config.get('top_p', 0.95)
         self.repetition_penalty = self.gen_config.get('repetition_penalty', 1.2)
         self.do_sample = self.gen_config.get('do_sample', True)
+        self.stream = self.gen_config.get('stream', True)
 
     def run(self):
         """Run interactive generation loop."""
@@ -470,6 +483,13 @@ class InteractiveMode:
                     fmt.info("Generating...")
                 print("-" * 70)
 
+                if self.stream:
+                    def stream_cb(chunk):
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                else:
+                    stream_cb = None
+
                 result = self.generator.generate(
                     prompt=prompt,
                     max_new_tokens=self.max_new_tokens,
@@ -478,11 +498,15 @@ class InteractiveMode:
                     top_p=self.top_p,
                     repetition_penalty=self.repetition_penalty,
                     do_sample=self.do_sample,
-                    show_prompt=True
+                    show_prompt=True,
+                    stream_callback=stream_cb
                 )
 
-                print(result['text'])
-                print("-" * 70)
+                if self.stream:
+                    print("\n" + "-" * 70)
+                else:
+                    print(result['text'])
+                    print("-" * 70)
 
                 # Display statistics
                 stats = result['statistics']
@@ -524,6 +548,7 @@ class InteractiveMode:
         print("  top_p               - Nucleus sampling (0.0-1.0)")
         print("  repetition_penalty  - Penalty for repeated tokens")
         print("  do_sample           - Enable sampling (0 or 1)")
+        print("  stream              - Stream output token by token (0 or 1)")
 
     def _handle_command(self, cmd: str):
         """Handle interactive commands."""
@@ -545,6 +570,7 @@ class InteractiveMode:
                 fmt.metric("top_p:", f"{self.top_p:.2f}")
                 fmt.metric("repetition_penalty:", f"{self.repetition_penalty:.2f}")
                 fmt.metric("do_sample:", str(self.do_sample))
+                fmt.metric("stream:", str(self.stream))
             else:
                 print("Current Parameters:")
                 print(f"  max_new_tokens:      {self.max_new_tokens}")
@@ -553,6 +579,7 @@ class InteractiveMode:
                 print(f"  top_p:               {self.top_p}")
                 print(f"  repetition_penalty:  {self.repetition_penalty}")
                 print(f"  do_sample:           {self.do_sample}")
+                print(f"  stream:              {self.stream}")
             print()
 
         elif cmd == '/set':
@@ -579,6 +606,8 @@ class InteractiveMode:
                     self.repetition_penalty = float(value)
                 elif param == 'do_sample':
                     self.do_sample = bool(int(value))
+                elif param == 'stream':
+                    self.stream = bool(int(value))
                 else:
                     if fmt:
                         fmt.error(f"Unknown parameter: {param}")

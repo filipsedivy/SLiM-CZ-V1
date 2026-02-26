@@ -185,6 +185,11 @@ Requirements:
         action='store_true',
         help='Use greedy decoding instead of sampling'
     )
+    parser.add_argument(
+        '--stream',
+        action='store_true',
+        help='Stream output token by token'
+    )
 
     # Other options
     parser.add_argument(
@@ -291,6 +296,13 @@ Requirements:
         CLIFormatter.info("Generating...")
         print("-" * 70)
 
+        if args.stream:
+            def stream_cb(chunk):
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+        else:
+            stream_cb = None
+
         result = generator.generate(
             prompt=args.prompt,
             max_new_tokens=args.max_tokens,
@@ -299,11 +311,15 @@ Requirements:
             top_p=args.top_p,
             repetition_penalty=args.repetition_penalty,
             do_sample=not args.no_sample,
-            show_prompt=True
+            show_prompt=True,
+            stream_callback=stream_cb
         )
 
-        print(result['text'])
-        print("-" * 70)
+        if args.stream:
+            print("\n" + "-" * 70)
+        else:
+            print(result['text'])
+            print("-" * 70)
 
         # Display statistics
         stats = result['statistics']
