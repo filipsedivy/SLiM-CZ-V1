@@ -52,6 +52,13 @@ train:
   patience: 10
   min_delta: 0.001
   
+  # Checkpointing
+  checkpoint:
+    enabled: true
+    save_every_epochs: 1
+    keep_last_k: 3
+    resume_from: null
+
   # Optional monitoring
   use_tensorboard: false
 
