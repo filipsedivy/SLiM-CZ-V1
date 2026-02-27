@@ -770,11 +770,11 @@ class Trainer:
 
                 # Restore RNG states for reproducibility
                 if 'torch_rng_state' in ckpt:
-                    torch.set_rng_state(ckpt['torch_rng_state'])
+                    torch.set_rng_state(ckpt['torch_rng_state'].cpu())
                 if 'numpy_rng_state' in ckpt:
                     np.random.set_state(ckpt['numpy_rng_state'])
                 if 'cuda_rng_state' in ckpt and torch.cuda.is_available():
-                    torch.cuda.set_rng_state(ckpt['cuda_rng_state'])
+                    torch.cuda.set_rng_state(ckpt['cuda_rng_state'].cpu())
 
                 self.tb_logger.set_resume_step(global_step)
                 console.success(
