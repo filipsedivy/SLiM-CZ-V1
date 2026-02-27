@@ -36,6 +36,7 @@ class MultiHeadAttention(nn.Module):
         
         self.qkv = nn.Linear(d_model, d_model * 3)
         self.proj = nn.Linear(d_model, d_model)
+        self.proj.NANNGPT_SCALE_INIT = 1
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> tuple:
@@ -51,11 +52,11 @@ class MultiHeadAttention(nn.Module):
             scores = scores.masked_fill(mask == 0, float('-inf'))
         
         attn = F.softmax(scores, dim=-1)
-        attn = self.dropout(attn)
         
         out = torch.matmul(attn, v)
         out = out.transpose(1, 2).contiguous().reshape(B, T, C)
         out = self.proj(out)
+        out = self.dropout(out)
         
         return out, attn
 
@@ -67,12 +68,13 @@ class FeedForward(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_ff)
         self.fc2 = nn.Linear(d_ff, d_model)
+        self.fc2.NANNGPT_SCALE_INIT = 1
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.gelu(self.fc1(x))
-        x = self.dropout(x)
         x = self.fc2(x)
+        x = self.dropout(x)
         return x
 
 
@@ -93,11 +95,11 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> tuple:
         # Attention
         attn_out, attn_weights = self.attn(self.norm1(x), mask)
-        x = x + self.dropout(attn_out)
+        x = x + attn_out
         
         # Feed-forward
         ff_out = self.ff(self.norm2(x))
-        x = x + self.dropout(ff_out)
+        x = x + ff_out
         
         return x, attn_weights
 
@@ -161,7 +163,10 @@ class SLiM_CZ_V1(nn.Module):
         """Initialize weights."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, std=0.02)
+                std = 0.02
+                if hasattr(module, 'NANNGPT_SCALE_INIT'):
+                    std *= (2 * self.num_layers) ** -0.5
+                nn.init.normal_(module.weight, std=std)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
@@ -185,7 +190,7 @@ class SLiM_CZ_V1(nn.Module):
         if mask is None:
             mask = torch.tril(torch.ones(T, T, device=x.device)).view(1, 1, T, T)
             
-        x = self.token_embedding(x)
+        x = self.token_embedding(x) * math.sqrt(self.d_model)
         x = self.pos_encoding(x)
         x = self.emb_dropout(x)
         
@@ -194,6 +199,7 @@ class SLiM_CZ_V1(nn.Module):
             x, attention = block(x, mask)
         
         x = self.norm(x)
+        x = self.emb_dropout(x)
         logits = self.output(x)
         
         return logits, attention
@@ -203,7 +209,10 @@ class SLiM_CZ_V1(nn.Module):
         start_tokens: torch.Tensor,
         max_length: int = 100,
         temperature: float = 1.0,
-        top_k: int = 50
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.2,
+        eos_token_id: int = None
     ) -> torch.Tensor:
         """
         Generate text autoregressively.
@@ -213,29 +222,62 @@ class SLiM_CZ_V1(nn.Module):
             max_length: Max tokens to generate
             temperature: Sampling temperature
             top_k: Top-k sampling
+            top_p: Nucleus top-p sampling
+            repetition_penalty: Repetition penalty coefficient
+            eos_token_id: Optional ID of EndOfSequence token to stop early
         
         Returns:
             Generated token IDs
         """
+        was_training = self.training
         self.eval()
         device = start_tokens.device
         
         with torch.no_grad():
             for _ in range(max_length):
                 logits, _ = self.forward(start_tokens[:, -self.max_seq_len:])
-                logits = logits[:, -1, :] / temperature
+                logits = logits[:, -1, :]
                 
+                # Apply repetition penalty
+                if repetition_penalty != 1.0:
+                    for token_id in set(start_tokens[0].tolist()):
+                        val = logits[0, token_id]
+                        logits[0, token_id] = val * repetition_penalty if val < 0 else val / repetition_penalty
+                        
+                logits = logits / temperature
+                
+                # Top-k sampling
                 if top_k > 0:
-                    top_k_logits, top_k_indices = torch.topk(logits, top_k)
-                    probs = F.softmax(top_k_logits, dim=-1)
-                    next_idx = torch.multinomial(probs, num_samples=1)
-                    next_token = top_k_indices.gather(-1, next_idx)
-                else:
-                    probs = F.softmax(logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
+                    top_k_actual = min(top_k, logits.size(-1))
+                    indices_to_remove = logits < torch.topk(logits, top_k_actual)[0][..., -1, None]
+                    logits[indices_to_remove] = float('-inf')
+                    
+                # Top-p nucleus sampling
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    logits[indices_to_remove] = float('-inf')
+                    
+                probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
                 
                 start_tokens = torch.cat([start_tokens, next_token], dim=1)
+                
+                # EOS stop check
+                if eos_token_id is not None and next_token.item() == eos_token_id:
+                    break
         
+        if was_training:
+            self.train()
+            
         return start_tokens
     
     def count_parameters(self) -> dict:
