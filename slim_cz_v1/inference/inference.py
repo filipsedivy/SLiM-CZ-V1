@@ -152,7 +152,7 @@ class ModelLoader:
         spinner = Spinner("Loading model checkpoint")
         spinner.start()
 
-        checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
         self.config = checkpoint.get('config', {})
         self.checkpoint_info = {
             'epoch': checkpoint.get('epoch', 'unknown'),
@@ -301,7 +301,8 @@ class TextGenerator:
                 # Apply repetition penalty
                 if repetition_penalty != 1.0 and generated_tokens:
                     for token_id in set(generated_tokens):
-                        logits[0, token_id] /= repetition_penalty
+                        val = logits[0, token_id]
+                        logits[0, token_id] = val * repetition_penalty if val < 0 else val / repetition_penalty
 
                 if do_sample:
                     # Top-k filtering
@@ -538,6 +539,7 @@ class InteractiveMode:
         print("Commands:")
         print("  /help              - Show this help message")
         print("  /params            - Show current generation parameters")
+        print("  /get [param]       - Get specific parameter or all of them")
         print("  /set <param> <val> - Set generation parameter")
         print("  /quit, /exit       - Exit interactive mode")
         print()
@@ -560,7 +562,7 @@ class InteractiveMode:
             print()
             self._print_help()
 
-        elif cmd == '/params':
+        elif cmd == '/params' or (cmd == '/get' and len(parts) == 1):
             print()
             if fmt:
                 fmt.section("Current Generation Parameters")
@@ -580,6 +582,29 @@ class InteractiveMode:
                 print(f"  repetition_penalty:  {self.repetition_penalty}")
                 print(f"  do_sample:           {self.do_sample}")
                 print(f"  stream:              {self.stream}")
+            print()
+
+        elif cmd == '/get':
+            param = parts[1]
+            val = None
+            if param == 'max_new_tokens': val = self.max_new_tokens
+            elif param == 'temperature': val = self.temperature
+            elif param == 'top_k': val = self.top_k
+            elif param == 'top_p': val = self.top_p
+            elif param == 'repetition_penalty': val = self.repetition_penalty
+            elif param == 'do_sample': val = self.do_sample
+            elif param == 'stream': val = self.stream
+            else:
+                if fmt:
+                    fmt.error(f"Unknown parameter: {param}")
+                else:
+                    print(f"ERROR: Unknown parameter: {param}")
+                return
+            print()
+            if fmt:
+                fmt.metric(f"{param}:", str(val))
+            else:
+                print(f"  {param}: {val}")
             print()
 
         elif cmd == '/set':
