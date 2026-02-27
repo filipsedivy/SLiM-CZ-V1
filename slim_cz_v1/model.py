@@ -179,6 +179,12 @@ class SLiM_CZ_V1(nn.Module):
             logits: (batch_size, seq_len, vocab_size)
             attention: Attention weights from last layer
         """
+        B, T = x.shape
+        
+        # Create causal mask if none is provided
+        if mask is None:
+            mask = torch.tril(torch.ones(T, T, device=x.device)).view(1, 1, T, T)
+            
         x = self.token_embedding(x)
         x = self.pos_encoding(x)
         x = self.emb_dropout(x)
