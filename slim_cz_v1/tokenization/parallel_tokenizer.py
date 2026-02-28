@@ -40,31 +40,33 @@ For 32 workers processing 1 TB file:
 - Disk I/O: ~2x file size (read once, write temp, write final)
 """
 
-from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+import gzip
+import hashlib
+import json
+import logging
+import multiprocessing as mp
+import os
+import shutil
+import signal
+import sys
+import tempfile
+import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
-import multiprocessing as mp
-import tempfile
-import shutil
-import time
-import json
-import gzip
-import os
-import sys
-import logging
-import traceback
-import signal
-import hashlib
+from pathlib import Path
+from typing import Any
 
 try:
     import sentencepiece as spm
+
     SENTENCEPIECE_AVAILABLE = True
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
 
 try:
     import numpy as np
+
     NUMPY_AVAILABLE = True
 except ImportError:
     NUMPY_AVAILABLE = False
@@ -75,14 +77,15 @@ except ImportError:
 # ============================================================================
 
 VERSION = "2.0.0"
-DEFAULT_CHUNK_SIZE = 50_000          # Lines per chunk
-DEFAULT_WRITE_BUFFER_SIZE = 10_000   # Lines before flush
-CHECKPOINT_INTERVAL = 100            # Save checkpoint every N chunks
+DEFAULT_CHUNK_SIZE = 50_000  # Lines per chunk
+DEFAULT_WRITE_BUFFER_SIZE = 10_000  # Lines before flush
+CHECKPOINT_INTERVAL = 100  # Save checkpoint every N chunks
 
 
 # ============================================================================
 # DATA STRUCTURES
 # ============================================================================
+
 
 @dataclass
 class ChunkSpec:
@@ -92,6 +95,7 @@ class ChunkSpec:
     Contains only metadata - no actual data loaded.
     Designed to be pickle-friendly for multiprocessing.
     """
+
     chunk_id: int
     start_byte: int
     end_byte: int
@@ -113,13 +117,14 @@ class ChunkResult:
 
     Contains path to output file, not the actual tokens.
     """
+
     chunk_id: int
     output_path: str
     num_lines: int
     num_tokens: int
     processing_time_sec: float
     input_bytes: int
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
     def tokens_per_second(self) -> float:
@@ -137,13 +142,14 @@ class ChunkResult:
 @dataclass
 class CheckpointData:
     """Checkpoint for resumable processing."""
+
     input_file: str
     input_file_hash: str
     output_file: str
     model_path: str
     chunk_size: int
     total_chunks: int
-    completed_chunks: List[int]
+    completed_chunks: list[int]
     temp_dir: str
     started_at: str
     last_update: str
@@ -152,13 +158,14 @@ class CheckpointData:
         return json.dumps(self.__dict__, indent=2)
 
     @classmethod
-    def from_json(cls, data: str) -> 'CheckpointData':
+    def from_json(cls, data: str) -> "CheckpointData":
         return cls(**json.loads(data))
 
 
 @dataclass
 class ProcessingStats:
     """Aggregated processing statistics."""
+
     total_chunks: int = 0
     completed_chunks: int = 0
     failed_chunks: int = 0
@@ -204,6 +211,7 @@ class ProcessingStats:
 # LOGGING
 # ============================================================================
 
+
 class TokenizerLogger:
     """Structured logger for tokenization process."""
 
@@ -211,8 +219,8 @@ class TokenizerLogger:
         self,
         name: str = "parallel_tokenizer",
         level: int = logging.INFO,
-        log_file: Optional[Path] = None,
-        quiet: bool = False
+        log_file: Path | None = None,
+        quiet: bool = False,
     ):
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG)
@@ -222,21 +230,26 @@ class TokenizerLogger:
         if not quiet:
             console = logging.StreamHandler(sys.stderr)
             console.setLevel(level)
-            console.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+            console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
             self.logger.addHandler(console)
 
         if log_file:
-            file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+            file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
             file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(logging.Formatter(
-                '%(asctime)s [%(levelname)s] %(message)s'
-            ))
+            file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
             self.logger.addHandler(file_handler)
 
-    def debug(self, msg: str): self.logger.debug(msg)
-    def info(self, msg: str): self.logger.info(msg)
-    def warning(self, msg: str): self.logger.warning(msg)
-    def error(self, msg: str): self.logger.error(msg)
+    def debug(self, msg: str):
+        self.logger.debug(msg)
+
+    def info(self, msg: str):
+        self.logger.info(msg)
+
+    def warning(self, msg: str):
+        self.logger.warning(msg)
+
+    def error(self, msg: str):
+        self.logger.error(msg)
 
     def section(self, title: str):
         if not self.quiet:
@@ -251,7 +264,7 @@ class TokenizerLogger:
             filled = int(bar_width * current / total) if total > 0 else 0
             bar = "█" * filled + "░" * (bar_width - filled)
             msg = f"\r   [{bar}] {pct:5.1f}% ({current}/{total}) {extra}"
-            print(msg, end='', flush=True, file=sys.stderr)
+            print(msg, end="", flush=True, file=sys.stderr)
 
     def progress_done(self):
         if not self.quiet:
@@ -262,16 +275,17 @@ class TokenizerLogger:
 # FILE UTILITIES
 # ============================================================================
 
+
 def compute_file_hash(filepath: Path, sample_size: int = 1024 * 1024) -> str:
     """
     Compute fast hash of file for checkpoint validation.
     Uses first and last sample_size bytes + file size for speed.
     """
     file_size = filepath.stat().st_size
-    hasher = hashlib.md5()
+    hasher = hashlib.sha256()
     hasher.update(str(file_size).encode())
 
-    with open(filepath, 'rb') as f:
+    with open(filepath, "rb") as f:
         hasher.update(f.read(sample_size))
         if file_size > sample_size * 2:
             f.seek(-sample_size, 2)
@@ -282,7 +296,7 @@ def compute_file_hash(filepath: Path, sample_size: int = 1024 * 1024) -> str:
 
 def format_bytes(num_bytes: int) -> str:
     """Format bytes as human-readable string."""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+    for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
         if abs(num_bytes) < 1024.0:
             return f"{num_bytes:.2f} {unit}"
         num_bytes /= 1024.0
@@ -294,7 +308,7 @@ def format_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     elif seconds < 3600:
-        return f"{seconds/60:.1f}m"
+        return f"{seconds / 60:.1f}m"
     else:
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
@@ -317,24 +331,21 @@ def estimate_eta(completed: int, total: int, elapsed: float) -> str:
 # CHUNK SCANNER
 # ============================================================================
 
+
 class ChunkScanner:
     """
     Scans input file to determine chunk boundaries.
     Memory efficient - only stores byte positions, not content.
     """
 
-    def __init__(
-        self,
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
-        logger: Optional[TokenizerLogger] = None
-    ):
+    def __init__(self, chunk_size: int = DEFAULT_CHUNK_SIZE, logger: TokenizerLogger | None = None):
         self.chunk_size = chunk_size
         self.logger = logger
 
-    def scan(self, filepath: Path, show_progress: bool = True) -> List[ChunkSpec]:
+    def scan(self, filepath: Path, show_progress: bool = True) -> list[ChunkSpec]:
         """Scan file and return chunk specifications."""
         file_size = filepath.stat().st_size
-        chunks: List[ChunkSpec] = []
+        chunks: list[ChunkSpec] = []
 
         chunk_id = 0
         chunk_start = 0
@@ -344,7 +355,7 @@ class ChunkScanner:
 
         last_progress = time.time()
 
-        with open(filepath, 'rb') as f:
+        with open(filepath, "rb") as f:
             while True:
                 line = f.readline()
                 if not line:
@@ -355,12 +366,14 @@ class ChunkScanner:
                 bytes_read = f.tell()
 
                 if lines_in_chunk >= self.chunk_size:
-                    chunks.append(ChunkSpec(
-                        chunk_id=chunk_id,
-                        start_byte=chunk_start,
-                        end_byte=bytes_read,
-                        estimated_lines=lines_in_chunk
-                    ))
+                    chunks.append(
+                        ChunkSpec(
+                            chunk_id=chunk_id,
+                            start_byte=chunk_start,
+                            end_byte=bytes_read,
+                            estimated_lines=lines_in_chunk,
+                        )
+                    )
 
                     chunk_id += 1
                     chunk_start = bytes_read
@@ -371,18 +384,19 @@ class ChunkScanner:
                     if now - last_progress >= 1.0:
                         pct = (bytes_read / file_size) * 100
                         self.logger.progress(
-                            int(pct), 100,
-                            f"| {total_lines:,} lines | {len(chunks)} chunks"
+                            int(pct), 100, f"| {total_lines:,} lines | {len(chunks)} chunks"
                         )
                         last_progress = now
 
         if lines_in_chunk > 0:
-            chunks.append(ChunkSpec(
-                chunk_id=chunk_id,
-                start_byte=chunk_start,
-                end_byte=file_size,
-                estimated_lines=lines_in_chunk
-            ))
+            chunks.append(
+                ChunkSpec(
+                    chunk_id=chunk_id,
+                    start_byte=chunk_start,
+                    end_byte=file_size,
+                    estimated_lines=lines_in_chunk,
+                )
+            )
 
         if show_progress and self.logger:
             self.logger.progress_done()
@@ -397,7 +411,8 @@ class ChunkScanner:
 # WORKER FUNCTIONS
 # ============================================================================
 
-def _worker_process_chunk(args: Tuple) -> ChunkResult:
+
+def _worker_process_chunk(args: tuple) -> ChunkResult:
     """
     Worker function for processing a single chunk.
 
@@ -415,7 +430,7 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
         temp_dir,
         write_buffer_size,
         compress_output,
-        output_format
+        output_format,
     ) = args
 
     start_time = time.time()
@@ -427,18 +442,18 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
 
         # Prepare output file
         output_filename = f"chunk_{chunk_spec.chunk_id:08d}.{output_format}"
-        if compress_output and output_format == 'text':
+        if compress_output and output_format == "text":
             output_filename += ".gz"
         output_path = os.path.join(temp_dir, output_filename)
 
         # Read chunk from input file
-        with open(input_path, 'rb') as f:
+        with open(input_path, "rb") as f:
             f.seek(chunk_spec.start_byte)
             chunk_bytes = f.read(chunk_spec.end_byte - chunk_spec.start_byte)
 
         # Decode bytes to text
-        chunk_text = chunk_bytes.decode('utf-8', errors='replace')
-        lines = chunk_text.split('\n')
+        chunk_text = chunk_bytes.decode("utf-8", errors="replace")
+        lines = chunk_text.split("\n")
 
         # Free memory
         del chunk_bytes
@@ -449,7 +464,7 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
         num_tokens = 0
         write_buffer = []
 
-        if output_format == 'bin':
+        if output_format == "bin":
             # Binary mode - collect all tokens then write as numpy array
             all_token_ids = []
             for line in lines:
@@ -460,39 +475,39 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
                 all_token_ids.extend(token_ids)
                 num_lines += 1
                 num_tokens += len(token_ids)
-            
+
             # Use uint16 if vocab size < 65535, else uint32
             vocab_size = sp.GetPieceSize()
             dtype = np.uint16 if vocab_size < 65535 else np.uint32
-            
+
             if all_token_ids:
                 np_tokens = np.array(all_token_ids, dtype=dtype)
                 np_tokens.tofile(output_path)
             else:
                 # Create empty file
-                open(output_path, 'wb').close()
+                open(output_path, "wb").close()
         else:
             # Text mode
             open_func = gzip.open if compress_output else open
-            mode = 'wt' if compress_output else 'w'
+            mode = "wt" if compress_output else "w"
 
-            with open_func(output_path, mode, encoding='utf-8') as out_f:
+            with open_func(output_path, mode, encoding="utf-8") as out_f:
                 for line in lines:
                     line = line.strip()
                     if not line:
                         continue
 
                     token_ids = sp.EncodeAsIds(line)
-                    write_buffer.append(' '.join(map(str, token_ids)))
+                    write_buffer.append(" ".join(map(str, token_ids)))
                     num_lines += 1
                     num_tokens += len(token_ids)
 
                     if len(write_buffer) >= write_buffer_size:
-                        out_f.write('\n'.join(write_buffer) + '\n')
+                        out_f.write("\n".join(write_buffer) + "\n")
                         write_buffer.clear()
 
                 if write_buffer:
-                    out_f.write('\n'.join(write_buffer) + '\n')
+                    out_f.write("\n".join(write_buffer) + "\n")
 
         processing_time = time.time() - start_time
 
@@ -502,7 +517,7 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
             num_lines=num_lines,
             num_tokens=num_tokens,
             processing_time_sec=processing_time,
-            input_bytes=chunk_spec.size_bytes
+            input_bytes=chunk_spec.size_bytes,
         )
 
     except Exception as e:
@@ -513,13 +528,14 @@ def _worker_process_chunk(args: Tuple) -> ChunkResult:
             num_tokens=0,
             processing_time_sec=time.time() - start_time,
             input_bytes=chunk_spec.size_bytes,
-            error=f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            error=f"{type(e).__name__}: {e!s}\n{traceback.format_exc()}",
         )
 
 
 # ============================================================================
 # MAIN TOKENIZER CLASS
 # ============================================================================
+
 
 class ParallelTokenizer:
     """
@@ -548,15 +564,15 @@ class ParallelTokenizer:
     def __init__(
         self,
         model_path: Path,
-        num_workers: Optional[int] = None,
+        num_workers: int | None = None,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         write_buffer_size: int = DEFAULT_WRITE_BUFFER_SIZE,
         compress_temp: bool = False,
-        output_format: str = 'text',
+        output_format: str = "text",
         quiet: bool = False,
         debug: bool = False,
-        log_file: Optional[Path] = None,
-        checkpoint_dir: Optional[Path] = None
+        log_file: Path | None = None,
+        checkpoint_dir: Path | None = None,
     ):
         """
         Initialize parallel tokenizer.
@@ -574,11 +590,9 @@ class ParallelTokenizer:
             checkpoint_dir: Directory for checkpoint files (enables resume)
         """
         if not SENTENCEPIECE_AVAILABLE:
-            raise ImportError(
-                "SentencePiece is required. Install with: pip install sentencepiece"
-            )
+            raise ImportError("SentencePiece is required. Install with: pip install sentencepiece")
 
-        if output_format == 'bin' and not NUMPY_AVAILABLE:
+        if output_format == "bin" and not NUMPY_AVAILABLE:
             raise ImportError(
                 "Numpy is required for binary output. Install with: pip install numpy"
             )
@@ -593,7 +607,7 @@ class ParallelTokenizer:
             sp.Load(str(self.model_path))
             self.vocab_size = sp.GetPieceSize()
         except Exception as e:
-            raise ValueError(f"Failed to load SentencePiece model: {e}")
+            raise ValueError(f"Failed to load SentencePiece model: {e}") from e
 
         # Worker configuration
         if num_workers is None:
@@ -609,11 +623,7 @@ class ParallelTokenizer:
 
         # Logging
         log_level = logging.DEBUG if debug else logging.INFO
-        self.logger = TokenizerLogger(
-            level=log_level,
-            log_file=log_file,
-            quiet=quiet
-        )
+        self.logger = TokenizerLogger(level=log_level, log_file=log_file, quiet=quiet)
         self.quiet = quiet
         self.debug = debug
 
@@ -621,7 +631,7 @@ class ParallelTokenizer:
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
 
         # Runtime state
-        self._temp_dir: Optional[Path] = None
+        self._temp_dir: Path | None = None
         self._interrupted = False
 
         # Log configuration
@@ -643,12 +653,8 @@ class ParallelTokenizer:
             self.logger.info(f"Checkpoint dir:    {self.checkpoint_dir}")
 
     def tokenize_file(
-        self,
-        input_path: Path,
-        output_path: Path,
-        resume: bool = True,
-        show_progress: bool = True
-    ) -> Dict[str, Any]:
+        self, input_path: Path, output_path: Path, resume: bool = True, show_progress: bool = True
+    ) -> dict[str, Any]:
         """
         Tokenize a text file using parallel processing.
 
@@ -685,45 +691,38 @@ class ParallelTokenizer:
 
         try:
             # Create temp directory
-            self._temp_dir = Path(tempfile.mkdtemp(prefix='tokenizer_'))
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="tokenizer_"))
             self.logger.debug(f"Temp directory: {self._temp_dir}")
 
             # PHASE 1: Scan input file
             self.logger.section("Phase 1: Scanning Input")
-            scanner = ChunkScanner(
-                chunk_size=self.chunk_size,
-                logger=self.logger
-            )
+            scanner = ChunkScanner(chunk_size=self.chunk_size, logger=self.logger)
             chunks = scanner.scan(input_path, show_progress=show_progress)
             stats.total_chunks = len(chunks)
 
             # Check for checkpoint
             completed_chunk_ids = set()
             if resume and self.checkpoint_dir:
-                completed_chunk_ids = self._load_checkpoint(
-                    input_path, file_hash, chunks
-                )
+                completed_chunk_ids = self._load_checkpoint(input_path, file_hash, chunks)
                 if completed_chunk_ids:
                     self.logger.info(
                         f"Resuming: {len(completed_chunk_ids)} chunks already complete"
                     )
 
             # Filter chunks to process
-            chunks_to_process = [
-                c for c in chunks if c.chunk_id not in completed_chunk_ids
-            ]
+            chunks_to_process = [c for c in chunks if c.chunk_id not in completed_chunk_ids]
 
             if not chunks_to_process:
                 self.logger.info("All chunks already processed!")
             else:
                 # PHASE 2: Process chunks
                 self.logger.section("Phase 2: Parallel Tokenization")
-                self.logger.info(f"Processing {len(chunks_to_process)} chunks with {self.num_workers} workers")
+                self.logger.info(
+                    f"Processing {len(chunks_to_process)} chunks with {self.num_workers} workers"
+                )
 
                 results = self._process_chunks(
-                    input_path=input_path,
-                    chunks=chunks_to_process,
-                    show_progress=show_progress
+                    input_path=input_path, chunks=chunks_to_process, show_progress=show_progress
                 )
 
                 # Update stats
@@ -744,14 +743,12 @@ class ParallelTokenizer:
             # PHASE 3: Merge results
             self.logger.section("Phase 3: Merging Results")
             merge_stats = self._merge_results(
-                output_path=output_path,
-                total_chunks=len(chunks),
-                show_progress=show_progress
+                output_path=output_path, total_chunks=len(chunks), show_progress=show_progress
             )
 
             # Update final stats
-            stats.total_lines = merge_stats['total_lines']
-            stats.total_tokens = merge_stats['total_tokens']
+            stats.total_lines = merge_stats["total_lines"]
+            stats.total_tokens = merge_stats["total_tokens"]
             stats.wall_time = time.time() - start_time
 
             # PHASE 4: Report
@@ -771,12 +768,13 @@ class ParallelTokenizer:
             if self._temp_dir and self._temp_dir.exists():
                 try:
                     shutil.rmtree(self._temp_dir)
-                    self.logger.debug(f"Cleaned up temp directory")
+                    self.logger.debug("Cleaned up temp directory")
                 except Exception as e:
                     self.logger.warning(f"Failed to cleanup temp dir: {e}")
 
     def _setup_signal_handlers(self):
         """Setup graceful shutdown on interrupt."""
+
         def handler(signum, frame):
             self._interrupted = True
             self.logger.warning("Interrupt received, finishing current work...")
@@ -785,11 +783,8 @@ class ParallelTokenizer:
         signal.signal(signal.SIGTERM, handler)
 
     def _process_chunks(
-        self,
-        input_path: Path,
-        chunks: List[ChunkSpec],
-        show_progress: bool
-    ) -> List[ChunkResult]:
+        self, input_path: Path, chunks: list[ChunkSpec], show_progress: bool
+    ) -> list[ChunkResult]:
         """Process chunks using multiprocessing pool."""
         # Prepare worker arguments
         worker_args = [
@@ -800,12 +795,12 @@ class ParallelTokenizer:
                 str(self._temp_dir),
                 self.write_buffer_size,
                 self.compress_temp,
-                self.output_format
+                self.output_format,
             )
             for chunk in chunks
         ]
 
-        results: List[ChunkResult] = []
+        results: list[ChunkResult] = []
         completed = 0
         last_checkpoint = 0
         last_progress_time = time.time()
@@ -815,13 +810,11 @@ class ParallelTokenizer:
         pool_chunksize = max(1, len(chunks) // (self.num_workers * 4))
 
         try:
-            ctx = mp.get_context('spawn')
+            ctx = mp.get_context("spawn")
 
             with ctx.Pool(processes=self.num_workers) as pool:
                 for result in pool.imap_unordered(
-                    _worker_process_chunk,
-                    worker_args,
-                    chunksize=pool_chunksize
+                    _worker_process_chunk, worker_args, chunksize=pool_chunksize
                 ):
                     results.append(result)
                     completed += 1
@@ -842,8 +835,7 @@ class ParallelTokenizer:
                             throughput = total_bytes / (1024 * 1024) / elapsed if elapsed > 0 else 0
 
                             self.logger.progress(
-                                completed, len(chunks),
-                                f"| {throughput:.1f} MB/s | ETA: {eta}"
+                                completed, len(chunks), f"| {throughput:.1f} MB/s | ETA: {eta}"
                             )
                             last_progress_time = now
 
@@ -851,8 +843,7 @@ class ParallelTokenizer:
                     if self.checkpoint_dir:
                         if completed - last_checkpoint >= CHECKPOINT_INTERVAL:
                             self._save_checkpoint(
-                                input_path,
-                                [r.chunk_id for r in results if not r.error]
+                                input_path, [r.chunk_id for r in results if not r.error]
                             )
                             last_checkpoint = completed
 
@@ -867,11 +858,8 @@ class ParallelTokenizer:
         return results
 
     def _merge_results(
-        self,
-        output_path: Path,
-        total_chunks: int,
-        show_progress: bool
-    ) -> Dict[str, int]:
+        self, output_path: Path, total_chunks: int, show_progress: bool
+    ) -> dict[str, int]:
         """Merge all chunk results into final output file."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -879,8 +867,8 @@ class ParallelTokenizer:
         total_tokens = 0
         merged = 0
 
-        mode = 'wb' if self.output_format == 'bin' else 'w'
-        encoding = None if self.output_format == 'bin' else 'utf-8'
+        mode = "wb" if self.output_format == "bin" else "w"
+        encoding = None if self.output_format == "bin" else "utf-8"
 
         with open(output_path, mode, encoding=encoding) as out_f:
             for chunk_id in range(total_chunks):
@@ -888,26 +876,25 @@ class ParallelTokenizer:
                 filename = f"chunk_{chunk_id:08d}.{ext}"
                 chunk_path = self._temp_dir / filename
 
-                if not chunk_path.exists():
-                    if self.output_format == 'text':
-                        chunk_path = self._temp_dir / (filename + ".gz")
+                if not chunk_path.exists() and self.output_format == "text":
+                    chunk_path = self._temp_dir / (filename + ".gz")
 
                 if not chunk_path.exists():
                     self.logger.warning(f"Missing chunk {chunk_id}")
                     continue
 
-                if self.output_format == 'bin':
+                if self.output_format == "bin":
                     # Binary merge: just copy bytes
-                    with open(chunk_path, 'rb') as in_f:
+                    with open(chunk_path, "rb") as in_f:
                         shutil.copyfileobj(in_f, out_f)
                     # We can't easily count lines/tokens in binary mode without reading
                     # but we already collected them in worker results
                 else:
                     # Text merge
-                    open_func = gzip.open if chunk_path.suffix == '.gz' else open
-                    mode = 'rt' if chunk_path.suffix == '.gz' else 'r'
+                    open_func = gzip.open if chunk_path.suffix == ".gz" else open
+                    mode = "rt" if chunk_path.suffix == ".gz" else "r"
 
-                    with open_func(chunk_path, mode, encoding='utf-8') as in_f:
+                    with open_func(chunk_path, mode, encoding="utf-8") as in_f:
                         for line in in_f:
                             out_f.write(line)
                             total_lines += 1
@@ -924,17 +911,9 @@ class ParallelTokenizer:
 
         self.logger.info(f"Merged {merged} chunks → {output_path}")
 
-        return {
-            'total_lines': total_lines,
-            'total_tokens': total_tokens
-        }
+        return {"total_lines": total_lines, "total_tokens": total_tokens}
 
-    def _load_checkpoint(
-        self,
-        input_path: Path,
-        file_hash: str,
-        chunks: List[ChunkSpec]
-    ) -> set:
+    def _load_checkpoint(self, input_path: Path, file_hash: str, chunks: list[ChunkSpec]) -> set:
         """Load checkpoint and return completed chunk IDs."""
         checkpoint_file = self.checkpoint_dir / "checkpoint.json"
 
@@ -942,7 +921,7 @@ class ParallelTokenizer:
             return set()
 
         try:
-            with open(checkpoint_file, 'r') as f:
+            with open(checkpoint_file) as f:
                 cp = CheckpointData.from_json(f.read())
 
             if cp.input_file_hash != file_hash:
@@ -959,7 +938,7 @@ class ParallelTokenizer:
             self.logger.warning(f"Failed to load checkpoint: {e}")
             return set()
 
-    def _save_checkpoint(self, input_path: Path, completed_ids: List[int]):
+    def _save_checkpoint(self, input_path: Path, completed_ids: list[int]):
         """Save checkpoint to disk."""
         if not self.checkpoint_dir:
             return
@@ -977,51 +956,52 @@ class ParallelTokenizer:
             completed_chunks=completed_ids,
             temp_dir=str(self._temp_dir),
             started_at=datetime.now().isoformat(),
-            last_update=datetime.now().isoformat()
+            last_update=datetime.now().isoformat(),
         )
 
-        with open(checkpoint_file, 'w') as f:
+        with open(checkpoint_file, "w") as f:
             f.write(cp.to_json())
 
     def _report_stats(self, stats: ProcessingStats, output_path: Path):
         """Print final statistics."""
-        self.logger.info(f"")
+        self.logger.info("")
         self.logger.info(f"Output file:       {output_path}")
         self.logger.info(f"Total lines:       {stats.total_lines:,}")
         self.logger.info(f"Total tokens:      {stats.total_tokens:,}")
         self.logger.info(f"Avg tokens/line:   {stats.avg_tokens_per_line:.2f}")
-        self.logger.info(f"")
+        self.logger.info("")
         self.logger.info(f"Wall time:         {format_duration(stats.wall_time)}")
         self.logger.info(f"Throughput:        {stats.throughput_mb_per_sec:.2f} MB/s")
         self.logger.info(f"Tokens/second:     {stats.tokens_per_second:,.0f}")
-        self.logger.info(f"")
+        self.logger.info("")
         self.logger.info(f"Chunks processed:  {stats.completed_chunks}/{stats.total_chunks}")
         if stats.failed_chunks > 0:
             self.logger.warning(f"Chunks failed:     {stats.failed_chunks}")
         self.logger.info(f"Parallelization:   {stats.parallelization_efficiency:.1f}x effective")
 
-    def _stats_to_dict(self, stats: ProcessingStats, output_path: Path) -> Dict[str, Any]:
+    def _stats_to_dict(self, stats: ProcessingStats, output_path: Path) -> dict[str, Any]:
         """Convert stats to dictionary for return."""
         return {
-            'output_path': str(output_path),
-            'total_lines': stats.total_lines,
-            'total_tokens': stats.total_tokens,
-            'avg_tokens_per_line': stats.avg_tokens_per_line,
-            'total_chunks': stats.total_chunks,
-            'completed_chunks': stats.completed_chunks,
-            'failed_chunks': stats.failed_chunks,
-            'wall_time_seconds': stats.wall_time,
-            'throughput_mb_per_second': stats.throughput_mb_per_sec,
-            'tokens_per_second': stats.tokens_per_second,
-            'parallelization_efficiency': stats.parallelization_efficiency,
-            'num_workers': self.num_workers,
-            'chunk_size': self.chunk_size
+            "output_path": str(output_path),
+            "total_lines": stats.total_lines,
+            "total_tokens": stats.total_tokens,
+            "avg_tokens_per_line": stats.avg_tokens_per_line,
+            "total_chunks": stats.total_chunks,
+            "completed_chunks": stats.completed_chunks,
+            "failed_chunks": stats.failed_chunks,
+            "wall_time_seconds": stats.wall_time,
+            "throughput_mb_per_second": stats.throughput_mb_per_sec,
+            "tokens_per_second": stats.tokens_per_second,
+            "parallelization_efficiency": stats.parallelization_efficiency,
+            "num_workers": self.num_workers,
+            "chunk_size": self.chunk_size,
         }
 
 
 # ============================================================================
 # SHARD PROCESSOR
 # ============================================================================
+
 
 class ShardProcessor:
     """
@@ -1056,12 +1036,12 @@ class ShardProcessor:
     def __init__(
         self,
         model_path: Path,
-        num_workers: Optional[int] = None,
+        num_workers: int | None = None,
         quiet: bool = False,
         debug: bool = False,
-        log_file: Optional[Path] = None,
-        checkpoint_dir: Optional[Path] = None,
-        output_format: str = 'text'
+        log_file: Path | None = None,
+        checkpoint_dir: Path | None = None,
+        output_format: str = "text",
     ):
         """
         Initialize shard processor.
@@ -1078,7 +1058,7 @@ class ShardProcessor:
         if not SENTENCEPIECE_AVAILABLE:
             raise ImportError("SentencePiece required: pip install sentencepiece")
 
-        if output_format == 'bin' and not NUMPY_AVAILABLE:
+        if output_format == "bin" and not NUMPY_AVAILABLE:
             raise ImportError("Numpy required for binary: pip install numpy")
 
         self.model_path = Path(model_path).resolve()
@@ -1093,7 +1073,7 @@ class ShardProcessor:
             sp.Load(str(self.model_path))
             self.vocab_size = sp.GetPieceSize()
         except Exception as e:
-            raise ValueError(f"Failed to load model: {e}")
+            raise ValueError(f"Failed to load model: {e}") from e
 
         # Workers
         if num_workers is None:
@@ -1103,11 +1083,7 @@ class ShardProcessor:
 
         # Logging
         log_level = logging.DEBUG if debug else logging.INFO
-        self.logger = TokenizerLogger(
-            level=log_level,
-            log_file=log_file,
-            quiet=quiet
-        )
+        self.logger = TokenizerLogger(level=log_level, log_file=log_file, quiet=quiet)
         self.quiet = quiet
         self.debug = debug
 
@@ -1116,7 +1092,7 @@ class ShardProcessor:
 
         self._interrupted = False
 
-    def discover_shards(self, input_pattern: str) -> List[Path]:
+    def discover_shards(self, input_pattern: str) -> list[Path]:
         """
         Discover shard files matching pattern.
 
@@ -1139,9 +1115,10 @@ class ShardProcessor:
             files = [Path(f) for f in glob.glob(input_pattern)]
 
         # Sort naturally (shard-1, shard-2, ..., shard-10, not shard-1, shard-10, shard-2)
-        def natural_sort_key(path: Path) -> List:
+        def natural_sort_key(path: Path) -> list:
             import re
-            parts = re.split(r'(\d+)', path.name)
+
+            parts = re.split(r"(\d+)", path.name)
             return [int(p) if p.isdigit() else p.lower() for p in parts]
 
         files = sorted(files, key=natural_sort_key)
@@ -1151,12 +1128,12 @@ class ShardProcessor:
     def process_shards(
         self,
         input_pattern: str,
-        output_dir: Optional[Path] = None,
-        output_path: Optional[Path] = None,
+        output_dir: Path | None = None,
+        output_path: Path | None = None,
         merge_output: bool = False,
         show_progress: bool = True,
-        resume: bool = True
-    ) -> Dict[str, Any]:
+        resume: bool = True,
+    ) -> dict[str, Any]:
         """
         Process shard files in parallel.
 
@@ -1199,7 +1176,7 @@ class ShardProcessor:
 
         # Setup
         start_time = time.time()
-        temp_dir = Path(tempfile.mkdtemp(prefix='tokenizer_shards_'))
+        temp_dir = Path(tempfile.mkdtemp(prefix="tokenizer_shards_"))
 
         # Check checkpoint
         completed_shards = set()
@@ -1220,7 +1197,7 @@ class ShardProcessor:
                     shards=shards_to_process,
                     temp_dir=temp_dir,
                     output_dir=output_dir if not merge_output else None,
-                    show_progress=show_progress
+                    show_progress=show_progress,
                 )
             else:
                 results = []
@@ -1234,33 +1211,39 @@ class ShardProcessor:
                     temp_dir=temp_dir,
                     output_dir=output_dir,
                     output_path=output_path,
-                    show_progress=show_progress
+                    show_progress=show_progress,
                 )
             else:
-                merge_stats = {'total_lines': 0, 'total_tokens': 0}
+                merge_stats = {"total_lines": 0, "total_tokens": 0}
                 for r in results:
                     if not r.error:
-                        merge_stats['total_lines'] += r.num_lines
-                        merge_stats['total_tokens'] += r.num_tokens
+                        merge_stats["total_lines"] += r.num_lines
+                        merge_stats["total_tokens"] += r.num_tokens
 
             # Calculate stats
             wall_time = time.time() - start_time
 
             stats = {
-                'total_shards': len(shards),
-                'processed_shards': len(shards_to_process),
-                'failed_shards': sum(1 for r in results if r.error),
-                'total_lines': merge_stats['total_lines'],
-                'total_tokens': merge_stats['total_tokens'],
-                'total_bytes': total_size,
-                'wall_time_seconds': wall_time,
-                'throughput_mb_per_second': (total_size / (1024*1024)) / wall_time if wall_time > 0 else 0,
-                'tokens_per_second': merge_stats['total_tokens'] / wall_time if wall_time > 0 else 0
+                "total_shards": len(shards),
+                "processed_shards": len(shards_to_process),
+                "failed_shards": sum(1 for r in results if r.error),
+                "total_lines": merge_stats["total_lines"],
+                "total_tokens": merge_stats["total_tokens"],
+                "total_bytes": total_size,
+                "wall_time_seconds": wall_time,
+                "throughput_mb_per_second": (total_size / (1024 * 1024)) / wall_time
+                if wall_time > 0
+                else 0,
+                "tokens_per_second": merge_stats["total_tokens"] / wall_time
+                if wall_time > 0
+                else 0,
             }
 
             # Report
             self.logger.section("Complete")
-            self.logger.info(f"Shards:      {stats['total_shards']} ({stats['failed_shards']} failed)")
+            self.logger.info(
+                f"Shards:      {stats['total_shards']} ({stats['failed_shards']} failed)"
+            )
             self.logger.info(f"Lines:       {stats['total_lines']:,}")
             self.logger.info(f"Tokens:      {stats['total_tokens']:,}")
             self.logger.info(f"Time:        {format_duration(wall_time)}")
@@ -1274,29 +1257,27 @@ class ShardProcessor:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _process_shards_parallel(
-        self,
-        shards: List[Path],
-        temp_dir: Path,
-        output_dir: Optional[Path],
-        show_progress: bool
-    ) -> List[ChunkResult]:
+        self, shards: list[Path], temp_dir: Path, output_dir: Path | None, show_progress: bool
+    ) -> list[ChunkResult]:
         """Process shards using worker pool."""
 
         # Prepare arguments
         worker_args = []
-        for i, shard in enumerate(shards):
+        for _i, shard in enumerate(shards):
             if output_dir:
                 out_path = output_dir / f"{shard.stem}.{self.output_format}"
             else:
                 out_path = temp_dir / f"{shard.stem}.{self.output_format}"
 
-            worker_args.append((
-                str(shard),
-                str(out_path),
-                str(self.model_path),
-                10000,  # write buffer
-                self.output_format
-            ))
+            worker_args.append(
+                (
+                    str(shard),
+                    str(out_path),
+                    str(self.model_path),
+                    10000,  # write buffer
+                    self.output_format,
+                )
+            )
 
         results = []
         completed = 0
@@ -1308,14 +1289,10 @@ class ShardProcessor:
             output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            ctx = mp.get_context('spawn')
+            ctx = mp.get_context("spawn")
 
             with ctx.Pool(processes=self.num_workers) as pool:
-                for result in pool.imap_unordered(
-                    _process_shard_worker,
-                    worker_args,
-                    chunksize=1
-                ):
+                for result in pool.imap_unordered(_process_shard_worker, worker_args, chunksize=1):
                     results.append(result)
                     completed += 1
 
@@ -1325,9 +1302,7 @@ class ShardProcessor:
 
                     # Save checkpoint
                     if self.checkpoint_dir and not result.error:
-                        self._save_shard_checkpoint(
-                            [r for r in results if not r.error]
-                        )
+                        self._save_shard_checkpoint([r for r in results if not r.error])
 
                     # Progress
                     if show_progress:
@@ -1337,11 +1312,12 @@ class ShardProcessor:
                             eta = estimate_eta(completed, len(shards), elapsed)
 
                             total_bytes = sum(r.input_bytes for r in results if not r.error)
-                            throughput = (total_bytes / (1024*1024)) / elapsed if elapsed > 0 else 0
+                            throughput = (
+                                (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                            )
 
                             self.logger.progress(
-                                completed, len(shards),
-                                f"| {throughput:.1f} MB/s | ETA: {eta}"
+                                completed, len(shards), f"| {throughput:.1f} MB/s | ETA: {eta}"
                             )
                             last_progress = now
 
@@ -1356,19 +1332,19 @@ class ShardProcessor:
 
     def _merge_shard_outputs(
         self,
-        shards: List[Path],
+        shards: list[Path],
         temp_dir: Path,
-        output_dir: Optional[Path],
+        output_dir: Path | None,
         output_path: Path,
-        show_progress: bool
-    ) -> Dict[str, int]:
+        show_progress: bool,
+    ) -> dict[str, int]:
         """Merge all shard outputs into single file."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         total_lines = 0
         total_tokens = 0
 
-        with open(output_path, 'w', encoding='utf-8') as out_f:
+        with open(output_path, "w", encoding="utf-8") as out_f:
             for i, shard in enumerate(shards):
                 # Find the output file
                 if output_dir:
@@ -1381,11 +1357,11 @@ class ShardProcessor:
                     continue
 
                 # Stream copy
-                if self.output_format == 'bin':
-                    with open(shard_output, 'rb') as in_f:
+                if self.output_format == "bin":
+                    with open(shard_output, "rb") as in_f:
                         shutil.copyfileobj(in_f, out_f)
                 else:
-                    with open(shard_output, 'r', encoding='utf-8') as in_f:
+                    with open(shard_output, encoding="utf-8") as in_f:
                         for line in in_f:
                             out_f.write(line)
                             total_lines += 1
@@ -1399,12 +1375,9 @@ class ShardProcessor:
 
         self.logger.info(f"Merged {len(shards)} shards → {output_path}")
 
-        return {
-            'total_lines': total_lines,
-            'total_tokens': total_tokens
-        }
+        return {"total_lines": total_lines, "total_tokens": total_tokens}
 
-    def _load_shard_checkpoint(self, shards: List[Path]) -> set:
+    def _load_shard_checkpoint(self, shards: list[Path]) -> set:
         """Load checkpoint for shard processing."""
         if not self.checkpoint_dir:
             return set()
@@ -1414,14 +1387,14 @@ class ShardProcessor:
             return set()
 
         try:
-            with open(cp_file, 'r') as f:
+            with open(cp_file) as f:
                 data = json.load(f)
-            return set(data.get('completed_shards', []))
+            return set(data.get("completed_shards", []))
         except Exception as e:
             self.logger.warning(f"Failed to load checkpoint: {e}")
             return set()
 
-    def _save_shard_checkpoint(self, results: List[ChunkResult]):
+    def _save_shard_checkpoint(self, results: list[ChunkResult]):
         """Save checkpoint for shard processing."""
         if not self.checkpoint_dir:
             return
@@ -1436,16 +1409,13 @@ class ShardProcessor:
                 name = Path(r.output_path).stem
                 completed.append(name)
 
-        data = {
-            'completed_shards': completed,
-            'last_update': datetime.now().isoformat()
-        }
+        data = {"completed_shards": completed, "last_update": datetime.now().isoformat()}
 
-        with open(cp_file, 'w') as f:
+        with open(cp_file, "w") as f:
             json.dump(data, f, indent=2)
 
 
-def _process_shard_worker(args: Tuple) -> ChunkResult:
+def _process_shard_worker(args: tuple) -> ChunkResult:
     """Worker function for processing a single shard file."""
     input_path, output_path, model_path, write_buffer_size, output_format = args
 
@@ -1462,9 +1432,9 @@ def _process_shard_worker(args: Tuple) -> ChunkResult:
         num_tokens = 0
         write_buffer = []
 
-        if output_format == 'bin':
+        if output_format == "bin":
             all_token_ids = []
-            with open(input_path, 'r', encoding='utf-8') as in_f:
+            with open(input_path, encoding="utf-8") as in_f:
                 for line in in_f:
                     line = line.strip()
                     if not line:
@@ -1477,31 +1447,31 @@ def _process_shard_worker(args: Tuple) -> ChunkResult:
             # Use uint16 if vocab size < 65535, else uint32
             vocab_size = sp.GetPieceSize()
             dtype = np.uint16 if vocab_size < 65535 else np.uint32
-            
+
             if all_token_ids:
                 np_tokens = np.array(all_token_ids, dtype=dtype)
                 np_tokens.tofile(output_path)
             else:
-                open(output_path, 'wb').close()
+                open(output_path, "wb").close()
         else:
-            with open(output_path, 'w', encoding='utf-8') as out_f:
-                with open(input_path, 'r', encoding='utf-8') as in_f:
+            with open(output_path, "w", encoding="utf-8") as out_f:
+                with open(input_path, encoding="utf-8") as in_f:
                     for line in in_f:
                         line = line.strip()
                         if not line:
                             continue
 
                         token_ids = sp.EncodeAsIds(line)
-                        write_buffer.append(' '.join(map(str, token_ids)))
+                        write_buffer.append(" ".join(map(str, token_ids)))
                         num_lines += 1
                         num_tokens += len(token_ids)
 
                         if len(write_buffer) >= write_buffer_size:
-                            out_f.write('\n'.join(write_buffer) + '\n')
+                            out_f.write("\n".join(write_buffer) + "\n")
                             write_buffer.clear()
 
                 if write_buffer:
-                    out_f.write('\n'.join(write_buffer) + '\n')
+                    out_f.write("\n".join(write_buffer) + "\n")
 
         return ChunkResult(
             chunk_id=0,
@@ -1509,7 +1479,7 @@ def _process_shard_worker(args: Tuple) -> ChunkResult:
             num_lines=num_lines,
             num_tokens=num_tokens,
             processing_time_sec=time.time() - start_time,
-            input_bytes=input_path.stat().st_size
+            input_bytes=input_path.stat().st_size,
         )
 
     except Exception as e:
@@ -1520,7 +1490,7 @@ def _process_shard_worker(args: Tuple) -> ChunkResult:
             num_tokens=0,
             processing_time_sec=time.time() - start_time,
             input_bytes=input_path.stat().st_size if input_path.exists() else 0,
-            error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
         )
 
 
@@ -1528,18 +1498,19 @@ def _process_shard_worker(args: Tuple) -> ChunkResult:
 # CONVENIENCE FUNCTION
 # ============================================================================
 
+
 def tokenize_shards_parallel(
     input_pattern: str,
     model_path: Path,
-    output_dir: Optional[Path] = None,
-    output_path: Optional[Path] = None,
+    output_dir: Path | None = None,
+    output_path: Path | None = None,
     merge_output: bool = False,
-    num_workers: Optional[int] = None,
+    num_workers: int | None = None,
     quiet: bool = False,
     debug: bool = False,
-    log_file: Optional[Path] = None,
-    checkpoint_dir: Optional[Path] = None
-) -> Dict[str, Any]:
+    log_file: Path | None = None,
+    checkpoint_dir: Path | None = None,
+) -> dict[str, Any]:
     """
     Convenience function for parallel shard tokenization.
 
@@ -1564,7 +1535,7 @@ def tokenize_shards_parallel(
         quiet=quiet,
         debug=debug,
         log_file=log_file,
-        checkpoint_dir=checkpoint_dir
+        checkpoint_dir=checkpoint_dir,
     )
 
     return processor.process_shards(
@@ -1572,7 +1543,7 @@ def tokenize_shards_parallel(
         output_dir=output_dir,
         output_path=output_path,
         merge_output=merge_output,
-        show_progress=not quiet
+        show_progress=not quiet,
     )
 
 
@@ -1580,13 +1551,13 @@ def tokenize_file_parallel(
     input_path: Path,
     model_path: Path,
     output_path: Path,
-    num_workers: Optional[int] = None,
+    num_workers: int | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     quiet: bool = False,
     debug: bool = False,
-    log_file: Optional[Path] = None,
-    checkpoint_dir: Optional[Path] = None
-) -> Dict[str, Any]:
+    log_file: Path | None = None,
+    checkpoint_dir: Path | None = None,
+) -> dict[str, Any]:
     """
     Convenience function for parallel tokenization.
 
@@ -1611,11 +1582,9 @@ def tokenize_file_parallel(
         quiet=quiet,
         debug=debug,
         log_file=log_file,
-        checkpoint_dir=checkpoint_dir
+        checkpoint_dir=checkpoint_dir,
     )
 
     return tokenizer.tokenize_file(
-        input_path=input_path,
-        output_path=output_path,
-        show_progress=not quiet
+        input_path=input_path, output_path=output_path, show_progress=not quiet
     )
