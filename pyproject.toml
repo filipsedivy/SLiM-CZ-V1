@@ -43,8 +43,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "ruff>=0.9.0",
+    "bandit>=1.7.0",
+    "mypy>=1.8.0",
 ]
 
 tokenizer = [
@@ -86,10 +87,74 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["slim_cz_v1"]
 
-[tool.black]
-line-length = 100
-target-version = ['py312']
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort (import sorting)
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "S",      # flake8-bandit (security)
+    "A",      # flake8-builtins
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "PTH",    # flake8-use-pathlib
+    "RUF",    # Ruff-specific rules
+]
+ignore = [
+    "S101",   # assert used (OK in tests)
+    "S603",   # subprocess call - check for execution of untrusted input
+    "S607",   # start process with a partial path
+    "E501",   # line too long (handled by formatter)
+    # Intentional code patterns
+    "N806",   # non-lowercase-variable-in-function (PyTorch convention: B, T, C)
+    "N801",   # invalid-class-name (SLiM_CZ_V1 is intentional)
+    "N812",   # lowercase-imported-as-non-lowercase (nn.functional as F)
+    "RUF002", # ambiguous-unicode-character-docstring (Czech diacritics)
+    "RUF001", # ambiguous-unicode-character-string (Czech diacritics)
+    "RUF012", # mutable-class-default (class-level constants)
+    "SIM102", # collapsible-if (readability preference)
+    "SIM105", # contextlib.suppress suggestion
+    "SIM108", # ternary operator suggestion (readability preference)
+    "SIM113", # enumerate-for-loop suggestion
+    "B005",   # strip-with-multi-characters (intentional character stripping)
+    # TODO: Gradually fix these existing issues
+    "PTH123", # builtin-open (migrate to pathlib)
+    "PTH107", # os-remove
+    "PTH105", # os-replace
+    "PTH110", # os-path-exists
+    "PTH118", # os-path-join
+    "PTH207", # glob
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S106"]
+"slim_cz_v1/cli/**/*.py" = ["S603", "S607"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = ["B101"]
