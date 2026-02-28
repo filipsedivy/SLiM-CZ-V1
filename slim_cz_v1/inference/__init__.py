@@ -1,11 +1,7 @@
-from .inference import (
-    ModelLoader,
-    TextGenerator,
-    InteractiveMode
-)
+from .inference import InteractiveMode, ModelLoader, TextGenerator
 
 __all__ = [
-    'ModelLoader',
-    'TextGenerator',
-    'InteractiveMode',
+    "InteractiveMode",
+    "ModelLoader",
+    "TextGenerator",
 ]

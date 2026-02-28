@@ -7,7 +7,7 @@ Provides model loading, text generation, and interactive mode functionality.
 import sys
 import time
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -21,17 +21,17 @@ except ImportError:
 
 from ..model import SLiM_CZ_V1
 
-
 # ============================================================
 # SPINNER
 # ============================================================
+
 
 class Spinner:
     """Simple spinner for loading operations."""
 
     def __init__(self, message: str = "Processing"):
         self.message = message
-        self.frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.current = 0
         self.active = False
 
@@ -49,7 +49,7 @@ class Spinner:
         sys.stdout.write(f"\r{self.message} {self.frames[self.current]}")
         sys.stdout.flush()
 
-    def stop(self, final_message: str = None):
+    def stop(self, final_message: str | None = None):
         """Stop spinner."""
         self.active = False
         if final_message:
@@ -63,10 +63,11 @@ class Spinner:
 # MODEL LOADER
 # ============================================================
 
+
 class ModelLoader:
     """Load trained SLiM-CZ-V1 model and tokenizer."""
 
-    def __init__(self, checkpoint_path: str, tokenizer_path: str, device: str = None):
+    def __init__(self, checkpoint_path: str, tokenizer_path: str, device: str | None = None):
         """
         Initialize model loader.
 
@@ -80,7 +81,7 @@ class ModelLoader:
 
         # Auto-detect device
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
@@ -103,22 +104,27 @@ class ModelLoader:
             # Dummy formatter for non-CLI usage
             class DummyFormatter:
                 @staticmethod
-                def section(msg): pass
+                def section(msg):
+                    pass
 
                 @staticmethod
-                def error(msg): print(f"ERROR: {msg}")
+                def error(msg):
+                    print(f"ERROR: {msg}")
 
                 @staticmethod
-                def info(msg): pass
+                def info(msg):
+                    pass
 
                 @staticmethod
-                def success(msg): pass
+                def success(msg):
+                    pass
 
                 @staticmethod
-                def warning(msg): pass
+                def warning(msg):
+                    pass
 
-                GREEN = ''
-                RESET = ''
+                GREEN = ""
+                RESET = ""
 
             fmt = DummyFormatter()
 
@@ -152,48 +158,49 @@ class ModelLoader:
         spinner = Spinner("Loading model checkpoint")
         spinner.start()
 
+        # nosec B614: weights_only=False required for full checkpoint (config, optimizer state)
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
-        self.config = checkpoint.get('config', {})
+        self.config = checkpoint.get("config", {})
         self.checkpoint_info = {
-            'epoch': checkpoint.get('epoch', 'unknown'),
-            'val_loss': checkpoint.get('best_val_loss', 'unknown'),
-            'val_perplexity': checkpoint.get('best_val_perplexity', 'unknown')
+            "epoch": checkpoint.get("epoch", "unknown"),
+            "val_loss": checkpoint.get("best_val_loss", "unknown"),
+            "val_perplexity": checkpoint.get("best_val_perplexity", "unknown"),
         }
 
         spinner.stop(f"{fmt.GREEN}✔ Checkpoint loaded{fmt.RESET}")
 
         # Detect max_seq_len from checkpoint
         max_seq_len_detected = None
-        if 'model_state_dict' in checkpoint:
-            if 'pos_encoding.pe' in checkpoint['model_state_dict']:
-                pe_shape = checkpoint['model_state_dict']['pos_encoding.pe'].shape
+        if "model_state_dict" in checkpoint:
+            if "pos_encoding.pe" in checkpoint["model_state_dict"]:
+                pe_shape = checkpoint["model_state_dict"]["pos_encoding.pe"].shape
                 max_seq_len_detected = pe_shape[0]
 
         # Create model
         spinner = Spinner("Initializing model")
         spinner.start()
 
-        model_config = self.config.get('model', {})
-        max_seq_len = max_seq_len_detected or model_config.get('max_seq_len', 512)
+        model_config = self.config.get("model", {})
+        max_seq_len = max_seq_len_detected or model_config.get("max_seq_len", 512)
 
         self.model = SLiM_CZ_V1(
             vocab_size=vocab_size,
-            d_model=model_config.get('d_model', 256),
-            num_heads=model_config.get('num_heads', 8),
-            num_layers=model_config.get('num_layers', 4),
-            d_ff=model_config.get('d_ff', 1024),
+            d_model=model_config.get("d_model", 256),
+            num_heads=model_config.get("num_heads", 8),
+            num_layers=model_config.get("num_layers", 4),
+            d_ff=model_config.get("d_ff", 1024),
             max_seq_len=max_seq_len,
-            dropout=model_config.get('dropout', 0.1),
-            weight_tying=model_config.get('weight_tying', True)
+            dropout=model_config.get("dropout", 0.1),
+            weight_tying=model_config.get("weight_tying", True),
         ).to(self.device)
 
         # Load weights
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
 
         spinner.stop(f"{fmt.GREEN}✔ Model initialized{fmt.RESET}")
 
-    def get_model_info(self) -> Dict[str, Any]:
+    def get_model_info(self) -> dict[str, Any]:
         """
         Get model information for display.
 
@@ -201,37 +208,38 @@ class ModelLoader:
             Dictionary with model architecture and checkpoint info
         """
         params = self.model.count_parameters()
-        model_cfg = self.config.get('model', {})
+        model_cfg = self.config.get("model", {})
 
         return {
-            'architecture': {
-                'name': 'SLiM-CZ-V1',
-                'description': 'Slavic Linguistic integrated Micro-model for Czechia',
-                'num_layers': model_cfg.get('num_layers', 'N/A'),
-                'num_heads': model_cfg.get('num_heads', 'N/A'),
-                'd_model': model_cfg.get('d_model', 'N/A'),
-                'd_ff': model_cfg.get('d_ff', 'N/A'),
-                'max_seq_len': self.model.max_seq_len,
-                'vocab_size': self.tokenizer.get_piece_size(),
+            "architecture": {
+                "name": "SLiM-CZ-V1",
+                "description": "Slavic Linguistic integrated Micro-model for Czechia",
+                "num_layers": model_cfg.get("num_layers", "N/A"),
+                "num_heads": model_cfg.get("num_heads", "N/A"),
+                "d_model": model_cfg.get("d_model", "N/A"),
+                "d_ff": model_cfg.get("d_ff", "N/A"),
+                "max_seq_len": self.model.max_seq_len,
+                "vocab_size": self.tokenizer.get_piece_size(),
             },
-            'parameters': {
-                'total': params['total'],
-                'total_millions': params['total'] / 1e6,
-                'memory_fp32_mb': (params['total'] * 4) / (1024 ** 2),
-                'memory_fp16_mb': (params['total'] * 2) / (1024 ** 2),
+            "parameters": {
+                "total": params["total"],
+                "total_millions": params["total"] / 1e6,
+                "memory_fp32_mb": (params["total"] * 4) / (1024**2),
+                "memory_fp16_mb": (params["total"] * 2) / (1024**2),
             },
-            'checkpoint': {
-                'epoch': self.checkpoint_info['epoch'],
-                'val_loss': self.checkpoint_info['val_loss'],
-                'val_perplexity': self.checkpoint_info['val_perplexity'],
+            "checkpoint": {
+                "epoch": self.checkpoint_info["epoch"],
+                "val_loss": self.checkpoint_info["val_loss"],
+                "val_perplexity": self.checkpoint_info["val_perplexity"],
             },
-            'device': str(self.device)
+            "device": str(self.device),
         }
 
 
 # ============================================================
 # TEXT GENERATOR
 # ============================================================
+
 
 class TextGenerator:
     """Generate text using SLiM-CZ-V1 model."""
@@ -250,17 +258,17 @@ class TextGenerator:
         self.device = device
 
     def generate(
-            self,
-            prompt: str,
-            max_new_tokens: int = 100,
-            temperature: float = 0.8,
-            top_k: int = 50,
-            top_p: float = 0.95,
-            repetition_penalty: float = 1.2,
-            do_sample: bool = True,
-            show_prompt: bool = True,
-            stream_callback=None
-    ) -> Dict[str, Any]:
+        self,
+        prompt: str,
+        max_new_tokens: int = 100,
+        temperature: float = 0.8,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        repetition_penalty: float = 1.2,
+        do_sample: bool = True,
+        show_prompt: bool = True,
+        stream_callback=None,
+    ) -> dict[str, Any]:
         """
         Generate text from prompt.
 
@@ -292,9 +300,9 @@ class TextGenerator:
 
         self.model.eval()
         with torch.no_grad():
-            for step in range(max_new_tokens):
+            for _step in range(max_new_tokens):
                 # Get logits from model
-                context = input_tensor[:, -self.model.max_seq_len:]
+                context = input_tensor[:, -self.model.max_seq_len :]
                 logits, _ = self.model(context)
                 logits = logits[:, -1, :] / temperature
 
@@ -302,14 +310,18 @@ class TextGenerator:
                 if repetition_penalty != 1.0 and generated_tokens:
                     for token_id in set(generated_tokens):
                         val = logits[0, token_id]
-                        logits[0, token_id] = val * repetition_penalty if val < 0 else val / repetition_penalty
+                        logits[0, token_id] = (
+                            val * repetition_penalty if val < 0 else val / repetition_penalty
+                        )
 
                 if do_sample:
                     # Top-k filtering
                     if top_k > 0:
                         top_k_actual = min(top_k, logits.size(-1))
-                        indices_to_remove = logits < torch.topk(logits, top_k_actual)[0][..., -1, None]
-                        logits[indices_to_remove] = float('-inf')
+                        indices_to_remove = (
+                            logits < torch.topk(logits, top_k_actual)[0][..., -1, None]
+                        )
+                        logits[indices_to_remove] = float("-inf")
 
                     # Top-p (nucleus) filtering
                     if top_p < 1.0:
@@ -317,13 +329,15 @@ class TextGenerator:
                         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
                         sorted_indices_to_remove = cumulative_probs > top_p
-                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
+                            ..., :-1
+                        ].clone()
                         sorted_indices_to_remove[..., 0] = 0
 
                         indices_to_remove = sorted_indices_to_remove.scatter(
                             1, sorted_indices, sorted_indices_to_remove
                         )
-                        logits[indices_to_remove] = float('-inf')
+                        logits[indices_to_remove] = float("-inf")
 
                     # Sample
                     probs = F.softmax(logits, dim=-1)
@@ -354,7 +368,7 @@ class TextGenerator:
         generated_text = self.tokenizer.decode(generated_ids)
 
         if not show_prompt:
-            generated_only_ids = generated_ids[len(input_ids):]
+            generated_only_ids = generated_ids[len(input_ids) :]
             generated_text = self.tokenizer.decode(generated_only_ids)
 
         # Calculate statistics
@@ -362,28 +376,28 @@ class TextGenerator:
         tokens_per_sec = actual_tokens / elapsed_time if elapsed_time > 0 else 0
 
         return {
-            'text': generated_text,
-            'statistics': {
-                'prompt_tokens': len(input_ids),
-                'generated_tokens': actual_tokens,
-                'total_tokens': len(generated_ids),
-                'elapsed_time': elapsed_time,
-                'tokens_per_second': tokens_per_sec,
-                'stopped_early': actual_tokens < max_new_tokens
-            }
+            "text": generated_text,
+            "statistics": {
+                "prompt_tokens": len(input_ids),
+                "generated_tokens": actual_tokens,
+                "total_tokens": len(generated_ids),
+                "elapsed_time": elapsed_time,
+                "tokens_per_second": tokens_per_sec,
+                "stopped_early": actual_tokens < max_new_tokens,
+            },
         }
 
     def batch_generate(
-            self,
-            prompts: List[str],
-            max_new_tokens: int = 100,
-            temperature: float = 0.8,
-            top_k: int = 50,
-            top_p: float = 0.95,
-            repetition_penalty: float = 1.2,
-            do_sample: bool = True,
-            progress_callback=None
-    ) -> List[Dict[str, Any]]:
+        self,
+        prompts: list[str],
+        max_new_tokens: int = 100,
+        temperature: float = 0.8,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        repetition_penalty: float = 1.2,
+        do_sample: bool = True,
+        progress_callback=None,
+    ) -> list[dict[str, Any]]:
         """
         Generate text for multiple prompts.
 
@@ -406,13 +420,13 @@ class TextGenerator:
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
                 do_sample=do_sample,
-                show_prompt=False
+                show_prompt=False,
             )
 
             results.append(result)
 
             if progress_callback:
-                progress_callback(i + 1, len(prompts), result['statistics'])
+                progress_callback(i + 1, len(prompts), result["statistics"])
 
         return results
 
@@ -421,15 +435,11 @@ class TextGenerator:
 # INTERACTIVE MODE
 # ============================================================
 
+
 class InteractiveMode:
     """Interactive text generation interface."""
 
-    def __init__(
-            self,
-            generator: TextGenerator,
-            config: Dict[str, Any],
-            cli_formatter=None
-    ):
+    def __init__(self, generator: TextGenerator, config: dict[str, Any], cli_formatter=None):
         """
         Initialize interactive mode.
 
@@ -439,17 +449,17 @@ class InteractiveMode:
             cli_formatter: Optional CLIFormatter for output
         """
         self.generator = generator
-        self.gen_config = config.get('generation', {})
+        self.gen_config = config.get("generation", {})
         self.cli_formatter = cli_formatter
 
         # Default parameters
-        self.max_new_tokens = self.gen_config.get('max_new_tokens', 100)
-        self.temperature = self.gen_config.get('temperature', 0.8)
-        self.top_k = self.gen_config.get('top_k', 50)
-        self.top_p = self.gen_config.get('top_p', 0.95)
-        self.repetition_penalty = self.gen_config.get('repetition_penalty', 1.2)
-        self.do_sample = self.gen_config.get('do_sample', True)
-        self.stream = self.gen_config.get('stream', True)
+        self.max_new_tokens = self.gen_config.get("max_new_tokens", 100)
+        self.temperature = self.gen_config.get("temperature", 0.8)
+        self.top_k = self.gen_config.get("top_k", 50)
+        self.top_p = self.gen_config.get("top_p", 0.95)
+        self.repetition_penalty = self.gen_config.get("repetition_penalty", 1.2)
+        self.do_sample = self.gen_config.get("do_sample", True)
+        self.stream = self.gen_config.get("stream", True)
 
     def run(self):
         """Run interactive generation loop."""
@@ -465,16 +475,13 @@ class InteractiveMode:
         while True:
             try:
                 print()
-                if fmt:
-                    prompt = input(f"{fmt.CYAN}> {fmt.RESET}").strip()
-                else:
-                    prompt = input("> ").strip()
+                prompt = input(f"{fmt.CYAN}> {fmt.RESET}").strip() if fmt else input("> ").strip()
 
                 if not prompt:
                     continue
 
                 # Handle commands
-                if prompt.startswith('/'):
+                if prompt.startswith("/"):
                     self._handle_command(prompt)
                     continue
 
@@ -485,6 +492,7 @@ class InteractiveMode:
                 print("-" * 70)
 
                 if self.stream:
+
                     def stream_cb(chunk):
                         sys.stdout.write(chunk)
                         sys.stdout.flush()
@@ -500,24 +508,28 @@ class InteractiveMode:
                     repetition_penalty=self.repetition_penalty,
                     do_sample=self.do_sample,
                     show_prompt=True,
-                    stream_callback=stream_cb
+                    stream_callback=stream_cb,
                 )
 
                 if self.stream:
                     print("\n" + "-" * 70)
                 else:
-                    print(result['text'])
+                    print(result["text"])
                     print("-" * 70)
 
                 # Display statistics
-                stats = result['statistics']
+                stats = result["statistics"]
                 if fmt:
-                    print(f"{fmt.GREEN}[COMPLETE]{fmt.RESET} " +
-                          f"{stats['generated_tokens']} tokens in {stats['elapsed_time']:.2f}s " +
-                          f"({stats['tokens_per_second']:.1f} tokens/sec)")
+                    print(
+                        f"{fmt.GREEN}[COMPLETE]{fmt.RESET} "
+                        + f"{stats['generated_tokens']} tokens in {stats['elapsed_time']:.2f}s "
+                        + f"({stats['tokens_per_second']:.1f} tokens/sec)"
+                    )
                 else:
-                    print(f"[COMPLETE] {stats['generated_tokens']} tokens in " +
-                          f"{stats['elapsed_time']:.2f}s ({stats['tokens_per_second']:.1f} tok/s)")
+                    print(
+                        f"[COMPLETE] {stats['generated_tokens']} tokens in "
+                        + f"{stats['elapsed_time']:.2f}s ({stats['tokens_per_second']:.1f} tok/s)"
+                    )
 
             except KeyboardInterrupt:
                 print()
@@ -558,11 +570,11 @@ class InteractiveMode:
         parts = cmd.split()
         cmd = parts[0].lower()
 
-        if cmd == '/help':
+        if cmd == "/help":
             print()
             self._print_help()
 
-        elif cmd == '/params' or (cmd == '/get' and len(parts) == 1):
+        elif cmd == "/params" or (cmd == "/get" and len(parts) == 1):
             print()
             if fmt:
                 fmt.section("Current Generation Parameters")
@@ -584,16 +596,23 @@ class InteractiveMode:
                 print(f"  stream:              {self.stream}")
             print()
 
-        elif cmd == '/get':
+        elif cmd == "/get":
             param = parts[1]
             val = None
-            if param == 'max_new_tokens': val = self.max_new_tokens
-            elif param == 'temperature': val = self.temperature
-            elif param == 'top_k': val = self.top_k
-            elif param == 'top_p': val = self.top_p
-            elif param == 'repetition_penalty': val = self.repetition_penalty
-            elif param == 'do_sample': val = self.do_sample
-            elif param == 'stream': val = self.stream
+            if param == "max_new_tokens":
+                val = self.max_new_tokens
+            elif param == "temperature":
+                val = self.temperature
+            elif param == "top_k":
+                val = self.top_k
+            elif param == "top_p":
+                val = self.top_p
+            elif param == "repetition_penalty":
+                val = self.repetition_penalty
+            elif param == "do_sample":
+                val = self.do_sample
+            elif param == "stream":
+                val = self.stream
             else:
                 if fmt:
                     fmt.error(f"Unknown parameter: {param}")
@@ -607,7 +626,7 @@ class InteractiveMode:
                 print(f"  {param}: {val}")
             print()
 
-        elif cmd == '/set':
+        elif cmd == "/set":
             if len(parts) < 3:
                 if fmt:
                     fmt.error("Usage: /set <parameter> <value>")
@@ -617,21 +636,21 @@ class InteractiveMode:
 
             param = parts[1]
             try:
-                value = float(parts[2]) if '.' in parts[2] else int(parts[2])
+                value = float(parts[2]) if "." in parts[2] else int(parts[2])
 
-                if param == 'max_new_tokens':
+                if param == "max_new_tokens":
                     self.max_new_tokens = int(value)
-                elif param == 'temperature':
+                elif param == "temperature":
                     self.temperature = float(value)
-                elif param == 'top_k':
+                elif param == "top_k":
                     self.top_k = int(value)
-                elif param == 'top_p':
+                elif param == "top_p":
                     self.top_p = float(value)
-                elif param == 'repetition_penalty':
+                elif param == "repetition_penalty":
                     self.repetition_penalty = float(value)
-                elif param == 'do_sample':
+                elif param == "do_sample":
                     self.do_sample = bool(int(value))
-                elif param == 'stream':
+                elif param == "stream":
                     self.stream = bool(int(value))
                 else:
                     if fmt:
@@ -651,7 +670,7 @@ class InteractiveMode:
                 else:
                     print("ERROR: Invalid value")
 
-        elif cmd == '/quit' or cmd == '/exit':
+        elif cmd == "/quit" or cmd == "/exit":
             if fmt:
                 fmt.info("Exiting...")
             else:
