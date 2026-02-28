@@ -30,8 +30,8 @@ Configuration:
 import os
 import sys
 import time
-from typing import Optional, Dict, Any
 from contextlib import contextmanager
+from typing import Any
 
 
 class Console:
@@ -45,14 +45,14 @@ class Console:
 
     # ANSI color codes
     COLORS = {
-        'reset': '\033[0m',
-        'bold': '\033[1m',
-        'red': '\033[0;31m',
-        'green': '\033[0;32m',
-        'yellow': '\033[0;33m',
-        'blue': '\033[0;34m',
-        'cyan': '\033[0;36m',
-        'gray': '\033[0;90m',
+        "reset": "\033[0m",
+        "bold": "\033[1m",
+        "red": "\033[0;31m",
+        "green": "\033[0;32m",
+        "yellow": "\033[0;33m",
+        "blue": "\033[0;34m",
+        "cyan": "\033[0;36m",
+        "gray": "\033[0;90m",
     }
 
     def __init__(self):
@@ -70,12 +70,13 @@ class Console:
 
     def _detect_environment(self):
         """Detect execution environment and set appropriate defaults."""
-        self.in_kaggle = 'KAGGLE_KERNEL_RUN_TYPE' in os.environ
-        self.in_colab = 'COLAB_GPU' in os.environ
+        self.in_kaggle = "KAGGLE_KERNEL_RUN_TYPE" in os.environ
+        self.in_colab = "COLAB_GPU" in os.environ
         self.in_notebook = False
 
         try:
             from IPython import get_ipython
+
             if get_ipython() is not None:
                 self.in_notebook = True
         except ImportError:
@@ -87,16 +88,16 @@ class Console:
 
     def _load_env_config(self):
         """Load configuration from environment variables."""
-        if os.environ.get('SLIM_VERBOSE', '').lower() in ('1', 'true', 'yes'):
+        if os.environ.get("SLIM_VERBOSE", "").lower() in ("1", "true", "yes"):
             self._verbose = True
 
-        if os.environ.get('SLIM_QUIET', '').lower() in ('1', 'true', 'yes'):
+        if os.environ.get("SLIM_QUIET", "").lower() in ("1", "true", "yes"):
             self._quiet = True
 
-        if os.environ.get('SLIM_NO_COLOR', '').lower() in ('1', 'true', 'yes'):
+        if os.environ.get("SLIM_NO_COLOR", "").lower() in ("1", "true", "yes"):
             self._use_color = False
 
-        if os.environ.get('SLIM_FLUSH', '').lower() in ('1', 'true', 'yes'):
+        if os.environ.get("SLIM_FLUSH", "").lower() in ("1", "true", "yes"):
             self._force_flush = True
 
     # ================================================================
@@ -125,12 +126,12 @@ class Console:
         return self
 
     def configure(
-            self,
-            verbose: Optional[bool] = None,
-            quiet: Optional[bool] = None,
-            color: Optional[bool] = None,
-            flush: Optional[bool] = None,
-            flush_interval: Optional[int] = None
+        self,
+        verbose: bool | None = None,
+        quiet: bool | None = None,
+        color: bool | None = None,
+        flush: bool | None = None,
+        flush_interval: int | None = None,
     ):
         """
         Configure console settings.
@@ -186,8 +187,7 @@ class Console:
             return f"{self.COLORS[color]}{text}{self.COLORS['reset']}"
         return text
 
-    def _print(self, message: str, color: Optional[str] = None,
-               force: bool = False, file=None):
+    def _print(self, message: str, color: str | None = None, force: bool = False, file=None):
         """Internal print with optional color and flush."""
         if file is None:
             file = sys.stdout
@@ -213,25 +213,25 @@ class Console:
     def info(self, message: str):
         """Print info message (suppressed in quiet mode)."""
         if not self._quiet:
-            self._print(f"[INFO]    {message}", 'blue')
+            self._print(f"[INFO]    {message}", "blue")
 
     def success(self, message: str):
         """Print success message (suppressed in quiet mode)."""
         if not self._quiet:
-            self._print(f"[SUCCESS] ✔ {message}", 'green')
+            self._print(f"[SUCCESS] ✔ {message}", "green")
 
     def warning(self, message: str):
         """Print warning message (always shown)."""
-        self._print(f"[WARNING] ⚠ {message}", 'yellow')
+        self._print(f"[WARNING] ⚠ {message}", "yellow")
 
     def error(self, message: str):
         """Print error message (always shown)."""
-        self._print(f"[ERROR]   ✖ {message}", 'red', file=sys.stderr)
+        self._print(f"[ERROR]   ✖ {message}", "red", file=sys.stderr)
 
     def verbose(self, message: str):
         """Print verbose message (only in verbose mode)."""
         if self._verbose:
-            self._print(f"[VERBOSE] {message}", 'gray')
+            self._print(f"[VERBOSE] {message}", "gray")
 
     def debug(self, message: str):
         """Alias for verbose."""
@@ -245,16 +245,16 @@ class Console:
         """Print section header."""
         if not self._quiet:
             self._print("")
-            self._print(self._colorize("=" * width, 'bold'))
-            self._print(self._colorize(title, 'bold'))
-            self._print(self._colorize("=" * width, 'bold'))
+            self._print(self._colorize("=" * width, "bold"))
+            self._print(self._colorize(title, "bold"))
+            self._print(self._colorize("=" * width, "bold"))
             self._print("")
 
     def section(self, title: str, width: int = 70):
         """Print subsection header."""
         if not self._quiet:
             self._print("")
-            self._print(self._colorize(title, 'cyan'))
+            self._print(self._colorize(title, "cyan"))
             self._print("-" * width)
 
     def kv(self, key: str, value: Any, indent: int = 2):
@@ -268,7 +268,7 @@ class Console:
             else:
                 self._print(f"{spaces}{key}: {value}")
 
-    def table(self, data: Dict[str, Any], indent: int = 2, key_width: int = 30):
+    def table(self, data: dict[str, Any], indent: int = 2, key_width: int = 30):
         """Print dictionary as aligned table."""
         if not self._quiet:
             spaces = " " * indent
@@ -285,8 +285,9 @@ class Console:
     # Progress reporting
     # ----------------------------------------------------------------
 
-    def progress(self, current: int, total: int, prefix: str = "",
-                 suffix: str = "", width: int = 30):
+    def progress(
+        self, current: int, total: int, prefix: str = "", suffix: str = "", width: int = 30
+    ):
         """Print progress bar (verbose mode or forced)."""
         if self._quiet:
             return
@@ -302,7 +303,7 @@ class Console:
             if self._should_flush():
                 self._flush()
 
-    def epoch(self, epoch: int, total_epochs: int, metrics: Dict[str, float]):
+    def epoch(self, epoch: int, total_epochs: int, metrics: dict[str, float]):
         """Print epoch summary."""
         if self._quiet:
             return
@@ -316,8 +317,7 @@ class Console:
 
         self._print(" | ".join(parts), force=True)
 
-    def batch(self, batch: int, total: int, loss: float,
-              extra: Optional[Dict[str, float]] = None):
+    def batch(self, batch: int, total: int, loss: float, extra: dict[str, float] | None = None):
         """Print batch progress (verbose mode only)."""
         if not self._verbose:
             # Still flush periodically even without output
@@ -335,7 +335,7 @@ class Console:
                 else:
                     msg += f" | {key}: {value}"
 
-        self._print(msg, 'gray')
+        self._print(msg, "gray")
 
     # ----------------------------------------------------------------
     # Context managers
@@ -396,7 +396,7 @@ class Console:
         """
         if time.time() - self._last_flush > self._flush_interval:
             if message and self._verbose:
-                self._print(f"[HEARTBEAT] {message}", 'gray', force=True)
+                self._print(f"[HEARTBEAT] {message}", "gray", force=True)
             else:
                 self._flush()
 
