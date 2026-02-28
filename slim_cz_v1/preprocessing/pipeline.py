@@ -4,13 +4,14 @@ Main preprocessing pipeline orchestration.
 Combines extractors and processors into a complete text preparation pipeline.
 """
 
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
 
 try:
     from tqdm import tqdm
+
     TQDM_AVAILABLE = True
 except ImportError:
     TQDM_AVAILABLE = False
@@ -18,22 +19,18 @@ except ImportError:
     print("[WARNING] Falling back to basic progress indication")
 
 from .base import (
+    Colors,
     PipelineRegistry,
     ProcessingResult,
+    print_error,
     print_header,
+    print_info,
     print_section,
     print_success,
-    print_info,
     print_warning,
-    print_error,
-    Colors
 )
-from .extractors import TxtExtractor, PdfExtractor, EpubExtractor
-from .processors import (
-    EncodingProcessor,
-    CleaningProcessor,
-    AnonymizationProcessor
-)
+from .extractors import EpubExtractor, PdfExtractor, TxtExtractor
+from .processors import AnonymizationProcessor, CleaningProcessor, EncodingProcessor
 
 
 class TextExtractionPipeline:
@@ -55,13 +52,13 @@ class TextExtractionPipeline:
     - max_workers: Number of parallel workers (default: 4)
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = config
         self.registry = PipelineRegistry()
         self._setup_pipeline()
 
         # Parallel processing configuration
-        self.max_workers = config.get('max_workers', 4)
+        self.max_workers = config.get("max_workers", 4)
 
     def _setup_pipeline(self):
         """Initialize and register extractors and processors."""
@@ -91,12 +88,14 @@ class TextExtractionPipeline:
         self.registry.register_processor(CleaningProcessor(self.config))
 
         # 3. Anonymization (optional, ALWAYS last)
-        if self.config.get('anonymize_emails') or \
-           self.config.get('anonymize_phones') or \
-           self.config.get('anonymize_urls'):
+        if (
+            self.config.get("anonymize_emails")
+            or self.config.get("anonymize_phones")
+            or self.config.get("anonymize_urls")
+        ):
             self.registry.register_processor(AnonymizationProcessor(self.config))
 
-    def collect_files(self, input_dir: Path) -> List[Path]:
+    def collect_files(self, input_dir: Path) -> list[Path]:
         """
         Collect all supported files from input directory.
 
@@ -106,11 +105,11 @@ class TextExtractionPipeline:
         Returns:
             List of file paths to process
         """
-        supported_extensions = {'.txt', '.pdf', '.epub'}
+        supported_extensions = {".txt", ".pdf", ".epub"}
         files = []
 
         for ext in supported_extensions:
-            files.extend(input_dir.rglob(f'*{ext}'))
+            files.extend(input_dir.rglob(f"*{ext}"))
 
         return sorted(files)
 
@@ -135,16 +134,12 @@ class TextExtractionPipeline:
             file_path=file_path,
             text=processed_text,
             success=success,
-            error=None if success else "Processing failed"
+            error=None if success else "Processing failed",
         )
 
         return result
 
-    def process_files(
-        self,
-        files: List[Path],
-        input_dir: Path
-    ) -> List[ProcessingResult]:
+    def process_files(self, files: list[Path], input_dir: Path) -> list[ProcessingResult]:
         """
         Process all files through the pipeline with parallel execution.
 
@@ -187,6 +182,7 @@ class TextExtractionPipeline:
         # CALCULATION: Determine optimal worker count
         # FORMULA: effective_workers = min(max_workers, num_files, 2 * cpu_cores)
         import os
+
         cpu_cores = os.cpu_count() or 4
         effective_workers = min(self.max_workers, len(files), 2 * cpu_cores)
 
@@ -207,7 +203,7 @@ class TextExtractionPipeline:
                     desc="Processing files",
                     unit="file",
                     ncols=100,
-                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
                 ) as pbar:
                     # Collect results as they complete
                     for future in as_completed(future_to_file):
@@ -250,10 +246,7 @@ class TextExtractionPipeline:
         return results
 
     def save_individual_files(
-        self,
-        results: List[ProcessingResult],
-        input_dir: Path,
-        output_dir: Path
+        self, results: list[ProcessingResult], input_dir: Path, output_dir: Path
     ):
         """
         Save processed texts as individual files (PRIMARY OUTPUT).
@@ -278,11 +271,11 @@ class TextExtractionPipeline:
 
             # Create relative path structure
             relative_path = result.file_path.relative_to(input_dir)
-            output_path = output_dir / relative_path.with_suffix('.txt')
+            output_path = output_dir / relative_path.with_suffix(".txt")
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Save processed text
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(result.text)
 
             saved_count += 1
@@ -298,11 +291,7 @@ class TextExtractionPipeline:
         print_info(f"Success rate: {success_rate * 100:.1f}% ({saved_count}/{total_results})")
         print_info(f"Total characters: {total_chars:,}")
 
-    def save_corpus_file(
-        self,
-        results: List[ProcessingResult],
-        corpus_path: Path
-    ):
+    def save_corpus_file(self, results: list[ProcessingResult], corpus_path: Path):
         """
         Save all processed texts as single concatenated corpus file (OPTIONAL OUTPUT).
 
@@ -329,8 +318,8 @@ class TextExtractionPipeline:
         corpus_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save as single concatenated file
-        with open(corpus_path, 'w', encoding='utf-8') as f:
-            f.write('\n\n'.join(texts))
+        with open(corpus_path, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(texts))
 
         print_section("Corpus File Output")
         print_success(f"Saved corpus: {corpus_path}")
@@ -338,11 +327,7 @@ class TextExtractionPipeline:
         print_info(f"Total characters: {total_chars:,}")
         print_info(f"Average chars per file: {avg_chars_per_file:,.0f}")
 
-    def save_metadata(
-        self,
-        results: List[ProcessingResult],
-        metadata_path: Path
-    ):
+    def save_metadata(self, results: list[ProcessingResult], metadata_path: Path):
         """
         Save processing metadata to JSON file.
 
@@ -360,33 +345,33 @@ class TextExtractionPipeline:
         total_chars = sum(len(t) for t in texts)
 
         metadata = {
-            'processing_statistics': {
-                'total_files': total_files,
-                'successful': successful,
-                'failed': failed,
-                'success_rate': round(success_rate, 4),
-                'total_characters': total_chars,
-                'parallel_workers': self.max_workers
+            "processing_statistics": {
+                "total_files": total_files,
+                "successful": successful,
+                "failed": failed,
+                "success_rate": round(success_rate, 4),
+                "total_characters": total_chars,
+                "parallel_workers": self.max_workers,
             },
-            'files_processed': [
+            "files_processed": [
                 {
-                    'path': str(r.file_path),
-                    'success': r.success,
-                    'characters': len(r.text) if r.text else 0,
-                    'error': r.error
+                    "path": str(r.file_path),
+                    "success": r.success,
+                    "characters": len(r.text) if r.text else 0,
+                    "error": r.error,
                 }
                 for r in results
             ],
-            'pipeline_config': self.config
+            "pipeline_config": self.config,
         }
 
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(metadata_path, 'w', encoding='utf-8') as f:
+        with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
         print_success(f"Saved metadata: {metadata_path}")
 
-    def run(self, input_dir: str, output_dir: str, corpus_file: Optional[str] = None):
+    def run(self, input_dir: str, output_dir: str, corpus_file: str | None = None):
         """
         Run complete extraction pipeline.
 
@@ -399,7 +384,11 @@ class TextExtractionPipeline:
         output_path = Path(output_dir)
 
         print_header("SLiM-CZ-V1 Text Extraction Pipeline")
-        print(f"{Colors.BOLD}Slavic Linguistic integrated Micro-model for Czechia{Colors.ENDC}".center(70))
+        print(
+            f"{Colors.BOLD}Slavic Linguistic integrated Micro-model for Czechia{Colors.ENDC}".center(
+                70
+            )
+        )
 
         print_section("Configuration")
         print_info(f"Input:  {input_dir}")
@@ -411,13 +400,15 @@ class TextExtractionPipeline:
         # Show pipeline configuration
         print_section("Pipeline Configuration")
         print(f"   {Colors.GREEN}✔{Colors.ENDC} UTF-8 Encoding Validation")
-        print(f"   {Colors.GREEN}✔{Colors.ENDC} Text Cleaning (min line length: {self.config.get('min_line_length', 10)} chars)")
+        print(
+            f"   {Colors.GREEN}✔{Colors.ENDC} Text Cleaning (min line length: {self.config.get('min_line_length', 10)} chars)"
+        )
 
-        if self.config.get('anonymize_emails'):
+        if self.config.get("anonymize_emails"):
             print(f"   {Colors.GREEN}✔{Colors.ENDC} Email Anonymization → <EMAIL>")
-        if self.config.get('anonymize_phones'):
+        if self.config.get("anonymize_phones"):
             print(f"   {Colors.GREEN}✔{Colors.ENDC} Phone Anonymization → <PHONE>")
-        if self.config.get('anonymize_urls'):
+        if self.config.get("anonymize_urls"):
             print(f"   {Colors.GREEN}✔{Colors.ENDC} URL Anonymization → <URL>")
 
         # Collect files
@@ -434,9 +425,9 @@ class TextExtractionPipeline:
         # FORMULA: epub_ratio = epub_files / total_files
 
         total_files = len(files)
-        txt_files = sum(1 for f in files if f.suffix == '.txt')
-        pdf_files = sum(1 for f in files if f.suffix == '.pdf')
-        epub_files = sum(1 for f in files if f.suffix == '.epub')
+        txt_files = sum(1 for f in files if f.suffix == ".txt")
+        pdf_files = sum(1 for f in files if f.suffix == ".pdf")
+        epub_files = sum(1 for f in files if f.suffix == ".epub")
         txt_ratio = txt_files / total_files if total_files > 0 else 0.0
         pdf_ratio = pdf_files / total_files if total_files > 0 else 0.0
         epub_ratio = epub_files / total_files if total_files > 0 else 0.0
@@ -456,7 +447,9 @@ class TextExtractionPipeline:
         success_rate = successful / len(results) if len(results) > 0 else 0.0
 
         print_section("Processing Results")
-        print_success(f"Successfully processed: {successful}/{len(results)} files ({success_rate * 100:.1f}%)")
+        print_success(
+            f"Successfully processed: {successful}/{len(results)} files ({success_rate * 100:.1f}%)"
+        )
         if failed > 0:
             print_warning(f"Failed: {failed} files ({(1 - success_rate) * 100:.1f}%)")
 
@@ -472,7 +465,7 @@ class TextExtractionPipeline:
             self.save_corpus_file(results, corpus_path)
 
         # Save metadata
-        metadata_path = output_path / 'extraction_metadata.json'
+        metadata_path = output_path / "extraction_metadata.json"
         self.save_metadata(results, metadata_path)
 
         print_header("Text Extraction Completed")
@@ -483,5 +476,7 @@ class TextExtractionPipeline:
             print(f"   2. Train tokenizer: slim-train-tokenizer --input {corpus_file}")
         else:
             print(f"   1. Review individual files in: {output_dir}")
-            print(f"   2. Create corpus: slim-extract-text --input {input_dir} --output {output_dir} --output-corpus corpus.txt")
+            print(
+                f"   2. Create corpus: slim-extract-text --input {input_dir} --output {output_dir} --output-corpus corpus.txt"
+            )
         print("=" * 70)

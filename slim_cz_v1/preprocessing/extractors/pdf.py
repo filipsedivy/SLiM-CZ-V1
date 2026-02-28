@@ -4,66 +4,66 @@ PDF file extractor.
 Handles PDF text extraction with detection of text-based vs image-based PDFs.
 """
 
-from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
 import warnings
+from pathlib import Path
+from typing import Any
 
-from ..base import BaseExtractor, print_warning, print_info
+from ..base import BaseExtractor, print_info, print_warning
 
 try:
     import fitz  # PyMuPDF
+
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
-    warnings.warn("PyMuPDF not installed. Install with: pip install pymupdf")
+    warnings.warn("PyMuPDF not installed. Install with: pip install pymupdf", stacklevel=2)
 
 
 class PdfExtractor(BaseExtractor):
     """
     Extractor for PDF files (.pdf).
-    
+
     Features:
     - Text-based vs image-based detection
     - Text extraction from text-based PDFs
     - Rejection of scanned/image-based PDFs (no OCR)
-    
+
     Detection Method:
     ----------------
     Average Characters Per Page Analysis
-    
+
     FORMULA:
         avg_chars_per_page = total_characters / page_count
-        
+
     INTERPRETATION:
         - High average (> threshold) → text-based PDF
         - Low average (≤ threshold) → scanned/image-based PDF
-        
+
     THRESHOLD:
         Default: 200 chars/page (empirical, conservative)
-        
+
     RATIONALE:
         - Text-based PDFs: typically 500-5000+ chars/page
         - Scanned PDFs: typically 0-100 chars/page (OCR artifacts only)
         - 200 chars/page catches most scans while avoiding false positives
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         super().__init__(config)
-        
+
         if not PYMUPDF_AVAILABLE:
             raise ImportError(
-                "PyMuPDF is required for PDF processing. "
-                "Install with: pip install pymupdf"
+                "PyMuPDF is required for PDF processing. Install with: pip install pymupdf"
             )
-        
+
         # Empirical threshold for text-based PDF detection
-        self.min_chars_per_page = config.get('pdf_min_chars_per_page', 200)
+        self.min_chars_per_page = config.get("pdf_min_chars_per_page", 200)
 
     def can_extract(self, file_path: Path) -> bool:
         """Check if file is a PDF."""
-        return file_path.suffix.lower() == '.pdf'
+        return file_path.suffix.lower() == ".pdf"
 
-    def is_text_based_pdf(self, doc: fitz.Document) -> Tuple[bool, float, int]:
+    def is_text_based_pdf(self, doc: fitz.Document) -> tuple[bool, float, int]:
         """
         Determine if PDF is text-based or image-based (scan).
 
@@ -105,7 +105,7 @@ class PdfExtractor(BaseExtractor):
 
         return is_text_based, avg_chars_per_page, total_chars
 
-    def extract(self, file_path: Path) -> Optional[str]:
+    def extract(self, file_path: Path) -> str | None:
         """
         Extract text from PDF file.
 
@@ -137,7 +137,7 @@ class PdfExtractor(BaseExtractor):
                 return None
 
             # Check if text-based
-            is_text_based, avg_chars, total_chars = self.is_text_based_pdf(doc)
+            is_text_based, avg_chars, _total_chars = self.is_text_based_pdf(doc)
 
             if not is_text_based:
                 print_warning(
@@ -188,5 +188,5 @@ class PdfExtractor(BaseExtractor):
             if doc is not None:
                 try:
                     doc.close()
-                except:
+                except Exception:  # noqa: S110
                     pass  # Ignore errors during cleanup

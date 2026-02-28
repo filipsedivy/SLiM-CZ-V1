@@ -2,32 +2,34 @@
 Base classes and utilities for data preprocessing pipeline.
 """
 
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Optional, Dict, Any, List
 import sys
 import time
-
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any
 
 # ============================================================
 # ANSI COLOR UTILITIES
 # ============================================================
 
+
 class Colors:
     """ANSI color codes for terminal output."""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
+
+    HEADER = "\033[95m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
 
 
 # ============================================================
 # TERMINAL OUTPUT UTILITIES
 # ============================================================
+
 
 class ProgressBar:
     """Simple progress bar for console output."""
@@ -51,7 +53,7 @@ class ProgressBar:
 
         percent = self.current / self.total
         filled = int(self.width * percent)
-        bar = '█' * filled + '░' * (self.width - filled)
+        bar = "█" * filled + "░" * (self.width - filled)
 
         elapsed = time.time() - self.start_time
         if self.current > 0:
@@ -60,7 +62,9 @@ class ProgressBar:
         else:
             eta_str = "ETA: --"
 
-        sys.stdout.write(f'\r{self.desc} |{bar}| {self.current}/{self.total} ({percent * 100:.1f}%) {eta_str}')
+        sys.stdout.write(
+            f"\r{self.desc} |{bar}| {self.current}/{self.total} ({percent * 100:.1f}%) {eta_str}"
+        )
         sys.stdout.flush()
 
         if self.current >= self.total:
@@ -110,14 +114,15 @@ def print_error(text: str):
 # BASE PIPELINE CLASSES
 # ============================================================
 
+
 class BaseExtractor(ABC):
     """
     Base class for file extractors.
-    
+
     Extractors handle reading raw content from different file formats.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = config
 
     @abstractmethod
@@ -126,10 +131,10 @@ class BaseExtractor(ABC):
         pass
 
     @abstractmethod
-    def extract(self, file_path: Path) -> Optional[str]:
+    def extract(self, file_path: Path) -> str | None:
         """
         Extract raw text from the file.
-        
+
         Returns:
             Raw text content or None if extraction failed.
         """
@@ -139,21 +144,21 @@ class BaseExtractor(ABC):
 class BaseProcessor(ABC):
     """
     Base class for text processors.
-    
+
     Processors transform text (cleaning, anonymization, encoding, etc.)
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = config
 
     @abstractmethod
     def process(self, text: str) -> str:
         """
         Process the input text.
-        
+
         Args:
             text: Input text to process
-            
+
         Returns:
             Processed text
         """
@@ -168,13 +173,13 @@ class BaseProcessor(ABC):
 class PipelineRegistry:
     """
     Registry for managing extractors and processors.
-    
+
     Allows dynamic registration and execution of processing steps.
     """
 
     def __init__(self):
-        self.extractors: List[BaseExtractor] = []
-        self.processors: List[BaseProcessor] = []
+        self.extractors: list[BaseExtractor] = []
+        self.processors: list[BaseProcessor] = []
 
     def register_extractor(self, extractor: BaseExtractor):
         """Register a file extractor."""
@@ -184,7 +189,7 @@ class PipelineRegistry:
         """Register a text processor."""
         self.processors.append(processor)
 
-    def get_extractor(self, file_path: Path) -> Optional[BaseExtractor]:
+    def get_extractor(self, file_path: Path) -> BaseExtractor | None:
         """Find appropriate extractor for the file."""
         for extractor in self.extractors:
             if extractor.can_extract(file_path):
@@ -194,10 +199,10 @@ class PipelineRegistry:
     def process_text(self, text: str) -> str:
         """
         Run text through all registered processors in order.
-        
+
         Args:
             text: Input text
-            
+
         Returns:
             Processed text after all processors
         """
@@ -206,13 +211,13 @@ class PipelineRegistry:
             result = processor.process(result)
         return result
 
-    def process_file(self, file_path: Path) -> Optional[str]:
+    def process_file(self, file_path: Path) -> str | None:
         """
         Complete file processing: extraction → processing.
-        
+
         Args:
             file_path: Path to file to process
-            
+
         Returns:
             Processed text or None if processing failed
         """
@@ -246,12 +251,13 @@ class PipelineRegistry:
 # DATA STRUCTURES
 # ============================================================
 
+
 class ProcessingResult:
     """
     Result of file processing operation.
     """
 
-    def __init__(self, file_path: Path, text: Optional[str], success: bool, error: Optional[str] = None):
+    def __init__(self, file_path: Path, text: str | None, success: bool, error: str | None = None):
         self.file_path = file_path
         self.text = text
         self.success = success
