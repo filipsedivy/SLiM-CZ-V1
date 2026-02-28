@@ -21,20 +21,20 @@ For TB-scale files:
 """
 
 import argparse
-import sys
 import json
 import multiprocessing as mp
+import sys
 from pathlib import Path
 
-from ..tokenization.parallel_tokenizer import ParallelTokenizer, ShardProcessor
 from ..preprocessing.base import (
     print_error,
-    print_success,
-    print_section,
+    print_header,
     print_info,
+    print_section,
+    print_success,
     print_warning,
-    print_header
 )
+from ..tokenization.parallel_tokenizer import ParallelTokenizer, ShardProcessor
 
 try:
     import sentencepiece as spm
@@ -43,11 +43,7 @@ except ImportError:
 
 
 def _write_tokenization_metadata(
-    *,
-    output_path: Path,
-    model_path: Path,
-    stats: dict,
-    mode: str
+    *, output_path: Path, model_path: Path, stats: dict, mode: str
 ) -> Path | None:
     """Write metadata file that helps later training-stage compatibility checks."""
     if spm is None:
@@ -57,17 +53,17 @@ def _write_tokenization_metadata(
     sp.Load(str(model_path))
 
     metadata = {
-        'format_version': '1.0',
-        'mode': mode,
-        'tokenizer_model': str(model_path.resolve()),
-        'tokenizer_vocab_size': int(sp.GetPieceSize()),
-        'total_lines': int(stats.get('total_lines', 0)),
-        'output_format': stats.get('output_format', 'text'),
-        'token_file': str(output_path.resolve()),
+        "format_version": "1.0",
+        "mode": mode,
+        "tokenizer_model": str(model_path.resolve()),
+        "tokenizer_vocab_size": int(sp.GetPieceSize()),
+        "total_lines": int(stats.get("total_lines", 0)),
+        "output_format": stats.get("output_format", "text"),
+        "token_file": str(output_path.resolve()),
     }
 
-    meta_path = output_path.with_suffix(output_path.suffix + '.meta.json')
-    with open(meta_path, 'w', encoding='utf-8') as f:
+    meta_path = output_path.with_suffix(output_path.suffix + ".meta.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
     return meta_path
@@ -75,7 +71,7 @@ def _write_tokenization_metadata(
 
 def format_bytes(num_bytes: int) -> str:
     """Format bytes as human-readable string."""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB', 'PB']:
+    for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
         if abs(num_bytes) < 1024.0:
             return f"{num_bytes:.2f} {unit}"
         num_bytes /= 1024.0
@@ -98,7 +94,7 @@ def main():
     """Main entry point for parallel tokenization CLI."""
 
     parser = argparse.ArgumentParser(
-        description='SLiM-CZ-V1 Parallel Batch Tokenization (Industrial Grade)',
+        description="SLiM-CZ-V1 Parallel Batch Tokenization (Industrial Grade)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -140,120 +136,106 @@ Recommended Settings by Total Size:
 
   Shard Mode (preferred for large data):
   - Any size:  --shards "pattern" --workers N --checkpoint-dir ./cp
-        """
+        """,
     )
 
     # Input mode (mutually exclusive: single file or shards)
     input_group = parser.add_mutually_exclusive_group(required=True)
 
-    input_group.add_argument(
-        '--input', '-i',
-        type=str,
-        help='Input text file (single file mode)'
-    )
+    input_group.add_argument("--input", "-i", type=str, help="Input text file (single file mode)")
 
     input_group.add_argument(
-        '--shards', '-s',
-        type=str,
-        help='Glob pattern for shard files (e.g., "shards/shard-*.txt")'
+        "--shards", "-s", type=str, help='Glob pattern for shard files (e.g., "shards/shard-*.txt")'
     )
 
     # Required arguments
     parser.add_argument(
-        '--model', '-m',
+        "--model",
+        "-m",
         type=str,
         required=True,
-        help='SentencePiece model file (.model from training)'
+        help="SentencePiece model file (.model from training)",
     )
 
     # Output (different meaning for single vs shard mode)
     parser.add_argument(
-        '--output', '-o',
+        "--output",
+        "-o",
         type=str,
-        help='Output file (single file mode) or merged output (shard mode with --merge)'
+        help="Output file (single file mode) or merged output (shard mode with --merge)",
     )
 
     parser.add_argument(
-        '--output-dir',
+        "--output-dir",
         type=str,
-        help='Output directory for per-shard token files (shard mode only)'
+        help="Output directory for per-shard token files (shard mode only)",
     )
 
     parser.add_argument(
-        '--merge',
-        action='store_true',
-        help='Merge shard outputs into single file (shard mode only)'
+        "--merge",
+        action="store_true",
+        help="Merge shard outputs into single file (shard mode only)",
     )
 
     # Performance tuning
     parser.add_argument(
-        '--workers', '-w',
+        "--workers",
+        "-w",
         type=int,
         default=None,
-        help='Number of worker processes (default: CPU count - 1)'
+        help="Number of worker processes (default: CPU count - 1)",
     )
 
     parser.add_argument(
-        '--chunk-size',
+        "--chunk-size",
         type=int,
         default=50000,
-        help='Number of lines per processing chunk (default: 50000)'
+        help="Number of lines per processing chunk (default: 50000)",
     )
 
     parser.add_argument(
-        '--write-buffer',
+        "--write-buffer",
         type=int,
         default=10000,
-        help='Lines to buffer before disk write (default: 10000)'
+        help="Lines to buffer before disk write (default: 10000)",
     )
 
     # Checkpointing
     parser.add_argument(
-        '--checkpoint-dir',
+        "--checkpoint-dir",
         type=str,
         default=None,
-        help='Directory for checkpoint files (enables resume after crash)'
+        help="Directory for checkpoint files (enables resume after crash)",
     )
 
     parser.add_argument(
-        '--no-resume',
-        action='store_true',
-        help='Do not attempt to resume from checkpoint (start fresh)'
+        "--no-resume",
+        action="store_true",
+        help="Do not attempt to resume from checkpoint (start fresh)",
     )
 
     # Output options
     parser.add_argument(
-        '--format',
+        "--format",
         type=str,
-        choices=['text', 'bin'],
-        default='text',
-        help='Output format: "text" for space-separated IDs, "bin" for raw numpy binary (recommended for 1TB+)'
+        choices=["text", "bin"],
+        default="text",
+        help='Output format: "text" for space-separated IDs, "bin" for raw numpy binary (recommended for 1TB+)',
     )
 
     parser.add_argument(
-        '--compress-temp',
-        action='store_true',
-        help='Gzip compress intermediate files (saves disk, costs CPU)'
+        "--compress-temp",
+        action="store_true",
+        help="Gzip compress intermediate files (saves disk, costs CPU)",
     )
 
-    parser.add_argument(
-        '--quiet', '-q',
-        action='store_true',
-        help='Suppress detailed output'
-    )
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress detailed output")
 
     # Debugging
-    parser.add_argument(
-        '--debug', '-d',
-        action='store_true',
-        help='Enable verbose debug logging'
-    )
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable verbose debug logging")
 
     parser.add_argument(
-        '--log-file', '-l',
-        type=str,
-        default=None,
-        help='Path to detailed log file'
+        "--log-file", "-l", type=str, default=None, help="Path to detailed log file"
     )
 
     args = parser.parse_args()
@@ -288,6 +270,7 @@ Recommended Settings by Total Size:
 
         # Discover shards for info display
         import glob
+
         pattern = args.shards
         if Path(pattern).is_dir():
             shard_files = list(Path(pattern).glob("*.txt"))
@@ -378,7 +361,7 @@ Recommended Settings by Total Size:
         print_info(f"Est. time:       {format_duration(time_estimate)}")
 
         # Recommendations
-        total_size_gb = total_size / (1024 ** 3)
+        total_size_gb = total_size / (1024**3)
         if total_size_gb > 100 and not checkpoint_dir:
             print()
             print_warning(f"Large dataset ({total_size_gb:.0f} GB) without checkpointing!")
@@ -401,7 +384,7 @@ Recommended Settings by Total Size:
                 quiet=args.quiet,
                 debug=args.debug,
                 log_file=log_file,
-                checkpoint_dir=checkpoint_dir
+                checkpoint_dir=checkpoint_dir,
             )
 
             stats = processor.process_shards(
@@ -410,13 +393,13 @@ Recommended Settings by Total Size:
                 output_path=output_path if args.merge else None,
                 merge_output=args.merge,
                 show_progress=not args.quiet,
-                resume=not args.no_resume
+                resume=not args.no_resume,
             )
 
             # Normalize stats keys for common output
-            stats['wall_time_seconds'] = stats.get('wall_time_seconds', 0)
-            stats['throughput_mb_per_second'] = stats.get('throughput_mb_per_second', 0)
-            failed_key = 'failed_shards'
+            stats["wall_time_seconds"] = stats.get("wall_time_seconds", 0)
+            stats["throughput_mb_per_second"] = stats.get("throughput_mb_per_second", 0)
+            failed_key = "failed_shards"
 
         else:
             # SINGLE FILE MODE
@@ -430,18 +413,18 @@ Recommended Settings by Total Size:
                 quiet=args.quiet,
                 debug=args.debug,
                 log_file=log_file,
-                checkpoint_dir=checkpoint_dir
+                checkpoint_dir=checkpoint_dir,
             )
 
             stats = tokenizer.tokenize_file(
                 input_path=input_path,
                 output_path=output_path,
                 resume=not args.no_resume,
-                show_progress=not args.quiet
+                show_progress=not args.quiet,
             )
             # Add format to stats for metadata
-            stats['output_format'] = args.format
-            failed_key = 'failed_chunks'
+            stats["output_format"] = args.format
+            failed_key = "failed_chunks"
 
         # Final summary
         if not args.quiet:
@@ -477,7 +460,7 @@ Recommended Settings by Total Size:
                     output_path=output_path,
                     model_path=model_path,
                     stats=stats,
-                    mode='shards-merged' if shard_mode else 'single-file'
+                    mode="shards-merged" if shard_mode else "single-file",
                 )
                 if meta_path:
                     print_info(f"Metadata:     {meta_path}")
@@ -485,14 +468,16 @@ Recommended Settings by Total Size:
                     print_warning("Metadata not written (sentencepiece not available)")
         else:
             print(f"[SUCCESS] Completed in {format_duration(stats['wall_time_seconds'])}")
-            print(f"[INFO] {stats['total_tokens']:,} tokens at {stats['throughput_mb_per_second']:.1f} MB/s")
+            print(
+                f"[INFO] {stats['total_tokens']:,} tokens at {stats['throughput_mb_per_second']:.1f} MB/s"
+            )
 
             if not shard_mode or args.merge:
                 meta_path = _write_tokenization_metadata(
                     output_path=output_path,
                     model_path=model_path,
                     stats=stats,
-                    mode='shards-merged' if shard_mode else 'single-file'
+                    mode="shards-merged" if shard_mode else "single-file",
                 )
                 if meta_path:
                     print(f"[INFO] Metadata: {meta_path}")
@@ -510,6 +495,7 @@ Recommended Settings by Total Size:
         print_error(f"Tokenization failed: {e}")
         if args.debug:
             import traceback
+
             traceback.print_exc()
         else:
             print_info("Use --debug for detailed error information")

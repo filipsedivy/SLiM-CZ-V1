@@ -6,28 +6,28 @@ Extracts and cleans text from various file formats (TXT, PDF, EPUB).
 """
 
 import argparse
-import sys
 import os
+import sys
 from pathlib import Path
 
 from ..preprocessing import TextExtractionPipeline
-
 
 # ============================================================
 # CLI OUTPUT FORMATTING
 # ============================================================
 
+
 class CLIFormatter:
     """CLI output formatter with ANSI color support."""
 
     # ANSI color codes
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
+    RED = "\033[0;31m"
+    GREEN = "\033[0;32m"
+    YELLOW = "\033[1;33m"
+    BLUE = "\033[0;34m"
+    CYAN = "\033[0;36m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
 
     @staticmethod
     def info(message: str):
@@ -74,11 +74,12 @@ class CLIFormatter:
 # MAIN CLI FUNCTION
 # ============================================================
 
+
 def main():
     """Main entry point for text extraction CLI."""
 
     parser = argparse.ArgumentParser(
-        description='SLiM-CZ-V1 Text Extraction Pipeline',
+        description="SLiM-CZ-V1 Text Extraction Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -119,73 +120,71 @@ Performance:
                  Default: 4 workers
                  Recommended: 4-8 for most systems
                  Expected speedup: 3-7x faster than sequential
-        """
+        """,
     )
 
     # Required arguments
     parser.add_argument(
-        '--input', '-i',
+        "--input",
+        "-i",
         type=str,
         required=True,
-        help='Input directory with raw files (TXT, PDF, EPUB)'
+        help="Input directory with raw files (TXT, PDF, EPUB)",
     )
 
     parser.add_argument(
-        '--output', '-o',
+        "--output",
+        "-o",
         type=str,
         required=True,
-        help='Output directory for individual processed files'
+        help="Output directory for individual processed files",
     )
 
     # Optional arguments - output
     parser.add_argument(
-        '--output-corpus', '-c',
+        "--output-corpus",
+        "-c",
         type=str,
         default=None,
-        help='Optional: Path to save concatenated corpus file'
+        help="Optional: Path to save concatenated corpus file",
     )
 
     # Optional arguments - performance
     parser.add_argument(
-        '--max-workers', '-w',
+        "--max-workers",
+        "-w",
         type=int,
         default=4,
-        help='Number of parallel workers (default: 4, recommended: 4-8)'
+        help="Number of parallel workers (default: 4, recommended: 4-8)",
     )
 
     # Optional arguments - text processing
     parser.add_argument(
-        '--min-line-length',
+        "--min-line-length",
         type=int,
         default=10,
-        help='Minimum line length in characters (default: 10)'
+        help="Minimum line length in characters (default: 10)",
     )
 
     # Optional arguments - PDF processing
     parser.add_argument(
-        '--pdf-min-chars-per-page',
+        "--pdf-min-chars-per-page",
         type=float,
         default=200.0,
-        help='PDF minimum average chars/page (default: 200.0)'
+        help="PDF minimum average chars/page (default: 200.0)",
     )
 
     # Optional arguments - anonymization
     parser.add_argument(
-        '--anonymize-emails',
-        action='store_true',
-        help='Replace email addresses with <EMAIL> token'
+        "--anonymize-emails", action="store_true", help="Replace email addresses with <EMAIL> token"
     )
 
     parser.add_argument(
-        '--anonymize-phones',
-        action='store_true',
-        help='Replace phone numbers with <PHONE> token'
+        "--anonymize-phones", action="store_true", help="Replace phone numbers with <PHONE> token"
     )
 
     parser.add_argument(
-        '--anonymize-urls',
-        action='store_true',
-        help='Replace URLs with <URL> token'
+        "--anonymize-urls", action="store_true", help="Replace URLs with <URL> token"
     )
 
     args = parser.parse_args()
@@ -215,7 +214,9 @@ Performance:
         return 1
 
     if max_workers > 2 * cpu_cores:
-        CLIFormatter.warning(f"Specified workers ({max_workers}) exceeds 2x CPU cores ({cpu_cores})")
+        CLIFormatter.warning(
+            f"Specified workers ({max_workers}) exceeds 2x CPU cores ({cpu_cores})"
+        )
         CLIFormatter.info(f"Recommended maximum: {2 * cpu_cores} workers")
         CLIFormatter.info("High worker count may cause overhead and reduce performance")
         print()
@@ -231,12 +232,12 @@ Performance:
     # ============================================================
 
     config = {
-        'min_line_length': args.min_line_length,
-        'pdf_min_chars_per_page': args.pdf_min_chars_per_page,
-        'anonymize_emails': args.anonymize_emails,
-        'anonymize_phones': args.anonymize_phones,
-        'anonymize_urls': args.anonymize_urls,
-        'max_workers': max_workers,
+        "min_line_length": args.min_line_length,
+        "pdf_min_chars_per_page": args.pdf_min_chars_per_page,
+        "anonymize_emails": args.anonymize_emails,
+        "anonymize_phones": args.anonymize_phones,
+        "anonymize_urls": args.anonymize_urls,
+        "max_workers": max_workers,
     }
 
     CLIFormatter.section("Configuration")
@@ -275,8 +276,10 @@ Performance:
         estimated_speedup = effective_workers * efficiency
 
         CLIFormatter.metric("Expected speedup:", f"~{estimated_speedup:.1f}x vs sequential")
-        CLIFormatter.info(f"Formula: speedup = min(workers, cores) * efficiency")
-        CLIFormatter.info(f"Calculation: {effective_workers} * {efficiency:.2f} = {estimated_speedup:.1f}x")
+        CLIFormatter.info("Formula: speedup = min(workers, cores) * efficiency")
+        CLIFormatter.info(
+            f"Calculation: {effective_workers} * {efficiency:.2f} = {estimated_speedup:.1f}x"
+        )
     else:
         CLIFormatter.section("Sequential Processing")
         CLIFormatter.info("Running with 1 worker (sequential mode)")
@@ -334,6 +337,7 @@ Performance:
     except Exception as e:
         CLIFormatter.error(f"Pipeline failed: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 
