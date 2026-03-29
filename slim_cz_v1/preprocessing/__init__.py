@@ -9,50 +9,46 @@ from .base import (
     BaseProcessor,
     PipelineRegistry,
     ProcessingResult,
+    print_error,
     print_header,
+    print_info,
     print_section,
     print_success,
-    print_info,
     print_warning,
-    print_error,
 )
-from .extractors import TxtExtractor, PdfExtractor, EpubExtractor
+from .extractors import EpubExtractor, PdfExtractor, TxtExtractor
+from .pipeline import TextExtractionPipeline
 from .processors import (
-    EncodingProcessor,
-    CleaningProcessor,
+    AdvancedAnonymizationProcessor,
     AdvancedCleaningProcessor,
     AnonymizationProcessor,
-    AdvancedAnonymizationProcessor,
+    CleaningProcessor,
+    EncodingProcessor,
 )
-from .pipeline import TextExtractionPipeline
 
 __all__ = [
+    "AdvancedAnonymizationProcessor",
+    "AdvancedCleaningProcessor",
+    "AnonymizationProcessor",
     # Base classes
-    'BaseExtractor',
-    'BaseProcessor',
-    'PipelineRegistry',
-    'ProcessingResult',
-
-    # Extractors
-    'TxtExtractor',
-    'PdfExtractor',
-    'EpubExtractor',
-    
+    "BaseExtractor",
+    "BaseProcessor",
+    "CleaningProcessor",
     # Processors
-    'EncodingProcessor',
-    'CleaningProcessor',
-    'AdvancedCleaningProcessor',
-    'AnonymizationProcessor',
-    'AdvancedAnonymizationProcessor',
-    
+    "EncodingProcessor",
+    "EpubExtractor",
+    "PdfExtractor",
+    "PipelineRegistry",
+    "ProcessingResult",
     # Pipeline
-    'TextExtractionPipeline',
-    
+    "TextExtractionPipeline",
+    # Extractors
+    "TxtExtractor",
+    "print_error",
     # Utilities
-    'print_header',
-    'print_section',
-    'print_success',
-    'print_info',
-    'print_warning',
-    'print_error',
+    "print_header",
+    "print_info",
+    "print_section",
+    "print_success",
+    "print_warning",
 ]

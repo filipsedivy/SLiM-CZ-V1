@@ -4,20 +4,21 @@ EPUB file extractor.
 Handles EPUB text extraction from eBook files with HTML/XHTML content parsing.
 """
 
-from pathlib import Path
-from typing import Optional, Dict, Any
 import re
 import warnings
+from pathlib import Path
+from typing import Any
 
-from ..base import BaseExtractor, print_warning, print_info
+from ..base import BaseExtractor, print_info, print_warning
 
 try:
     import ebooklib
     from ebooklib import epub
+
     EBOOKLIB_AVAILABLE = True
 except ImportError:
     EBOOKLIB_AVAILABLE = False
-    warnings.warn("ebooklib not installed. Install with: pip install ebooklib")
+    warnings.warn("ebooklib not installed. Install with: pip install ebooklib", stacklevel=2)
 
 
 class EpubExtractor(BaseExtractor):
@@ -51,21 +52,20 @@ class EpubExtractor(BaseExtractor):
         - 100 chars/item catches most image-only books while avoiding false positives
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         super().__init__(config)
 
         if not EBOOKLIB_AVAILABLE:
             raise ImportError(
-                "ebooklib is required for EPUB processing. "
-                "Install with: pip install ebooklib"
+                "ebooklib is required for EPUB processing. Install with: pip install ebooklib"
             )
 
         # Empirical threshold for text-based EPUB detection
-        self.min_chars_per_item = config.get('epub_min_chars_per_item', 100)
+        self.min_chars_per_item = config.get("epub_min_chars_per_item", 100)
 
     def can_extract(self, file_path: Path) -> bool:
         """Check if file is an EPUB."""
-        return file_path.suffix.lower() == '.epub'
+        return file_path.suffix.lower() == ".epub"
 
     def _extract_text_from_html(self, html_content: bytes) -> str:
         """
@@ -87,10 +87,10 @@ class EpubExtractor(BaseExtractor):
         try:
             # Decode HTML content
             try:
-                html_str = html_content.decode('utf-8')
+                html_str = html_content.decode("utf-8")
             except UnicodeDecodeError:
                 # Try alternative encodings
-                for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                for encoding in ["latin-1", "cp1252", "iso-8859-1"]:
                     try:
                         html_str = html_content.decode(encoding)
                         break
@@ -98,39 +98,43 @@ class EpubExtractor(BaseExtractor):
                         continue
                 else:
                     # Last resort: replace errors
-                    html_str = html_content.decode('utf-8', errors='replace')
+                    html_str = html_content.decode("utf-8", errors="replace")
 
             # Remove script tags and content
-            html_str = re.sub(r'<script[^>]*>.*?</script>', '', html_str, flags=re.DOTALL | re.IGNORECASE)
+            html_str = re.sub(
+                r"<script[^>]*>.*?</script>", "", html_str, flags=re.DOTALL | re.IGNORECASE
+            )
 
             # Remove style tags and content
-            html_str = re.sub(r'<style[^>]*>.*?</style>', '', html_str, flags=re.DOTALL | re.IGNORECASE)
+            html_str = re.sub(
+                r"<style[^>]*>.*?</style>", "", html_str, flags=re.DOTALL | re.IGNORECASE
+            )
 
             # Replace block-level tags with newlines (preserve paragraph structure)
-            block_tags = r'</?(?:p|div|br|h[1-6]|li|tr|td|th)[^>]*>'
-            html_str = re.sub(block_tags, '\n', html_str, flags=re.IGNORECASE)
+            block_tags = r"</?(?:p|div|br|h[1-6]|li|tr|td|th)[^>]*>"
+            html_str = re.sub(block_tags, "\n", html_str, flags=re.IGNORECASE)
 
             # Remove all remaining HTML tags
-            html_str = re.sub(r'<[^>]+>', '', html_str)
+            html_str = re.sub(r"<[^>]+>", "", html_str)
 
             # Decode HTML entities
-            html_str = html_str.replace('&nbsp;', ' ')
-            html_str = html_str.replace('&amp;', '&')
-            html_str = html_str.replace('&lt;', '<')
-            html_str = html_str.replace('&gt;', '>')
-            html_str = html_str.replace('&quot;', '"')
-            html_str = html_str.replace('&#39;', "'")
+            html_str = html_str.replace("&nbsp;", " ")
+            html_str = html_str.replace("&amp;", "&")
+            html_str = html_str.replace("&lt;", "<")
+            html_str = html_str.replace("&gt;", ">")
+            html_str = html_str.replace("&quot;", '"')
+            html_str = html_str.replace("&#39;", "'")
 
             # Normalize whitespace
             # Replace multiple spaces with single space
-            html_str = re.sub(r' +', ' ', html_str)
+            html_str = re.sub(r" +", " ", html_str)
 
             # Replace multiple newlines with double newline (paragraph break)
-            html_str = re.sub(r'\n\n+', '\n\n', html_str)
+            html_str = re.sub(r"\n\n+", "\n\n", html_str)
 
             # Remove leading/trailing whitespace from each line
-            lines = [line.strip() for line in html_str.split('\n')]
-            html_str = '\n'.join(lines)
+            lines = [line.strip() for line in html_str.split("\n")]
+            html_str = "\n".join(lines)
 
             # Final cleanup
             html_str = html_str.strip()
@@ -141,7 +145,7 @@ class EpubExtractor(BaseExtractor):
             print_warning(f"Failed to parse HTML content: {e}")
             return ""
 
-    def extract(self, file_path: Path) -> Optional[str]:
+    def extract(self, file_path: Path) -> str | None:
         """
         Extract text from EPUB file.
 

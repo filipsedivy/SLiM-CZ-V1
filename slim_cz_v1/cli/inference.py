@@ -9,12 +9,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from ..inference import ModelLoader, TextGenerator, InteractiveMode
-
+from ..inference import InteractiveMode, ModelLoader, TextGenerator
 
 # ============================================================
 # CLI OUTPUT FORMATTING
 # ============================================================
+
 
 class CLIFormatter:
     """
@@ -28,13 +28,13 @@ class CLIFormatter:
     """
 
     # ANSI color codes
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    CYAN = '\033[0;36m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
+    RED = "\033[0;31m"
+    GREEN = "\033[0;32m"
+    YELLOW = "\033[1;33m"
+    BLUE = "\033[0;34m"
+    CYAN = "\033[0;36m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
 
     @staticmethod
     def info(message: str):
@@ -81,11 +81,12 @@ class CLIFormatter:
 # MAIN CLI FUNCTION
 # ============================================================
 
+
 def main():
     """Main entry point for inference CLI."""
 
     parser = argparse.ArgumentParser(
-        description='SLiM-CZ-V1 Model Inference',
+        description="SLiM-CZ-V1 Model Inference",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -115,88 +116,46 @@ Requirements:
   - Tokenizer model (.model file)
   - PyTorch >= 2.0.0
   - SentencePiece
-        """
+        """,
     )
 
     # Required arguments
     parser.add_argument(
-        '--checkpoint', '-c',
-        type=str,
-        required=True,
-        help='Path to model checkpoint (.pt file)'
+        "--checkpoint", "-c", type=str, required=True, help="Path to model checkpoint (.pt file)"
     )
     parser.add_argument(
-        '--tokenizer', '-t',
-        type=str,
-        required=True,
-        help='Path to tokenizer model (.model file)'
+        "--tokenizer", "-t", type=str, required=True, help="Path to tokenizer model (.model file)"
     )
 
     # Generation mode
-    parser.add_argument(
-        '--prompt', '-p',
-        type=str,
-        help='Single prompt for generation'
-    )
-    parser.add_argument(
-        '--prompts-file',
-        type=str,
-        help='File with prompts (one per line)'
-    )
-    parser.add_argument(
-        '--output', '-o',
-        type=str,
-        help='Output file for batch generation'
-    )
+    parser.add_argument("--prompt", "-p", type=str, help="Single prompt for generation")
+    parser.add_argument("--prompts-file", type=str, help="File with prompts (one per line)")
+    parser.add_argument("--output", "-o", type=str, help="Output file for batch generation")
 
     # Generation parameters
     parser.add_argument(
-        '--max-tokens',
-        type=int,
-        default=100,
-        help='Maximum tokens to generate (default: 100)'
+        "--max-tokens", type=int, default=100, help="Maximum tokens to generate (default: 100)"
     )
     parser.add_argument(
-        '--temperature',
-        type=float,
-        default=0.8,
-        help='Sampling temperature (default: 0.8)'
+        "--temperature", type=float, default=0.8, help="Sampling temperature (default: 0.8)"
     )
     parser.add_argument(
-        '--top-k',
-        type=int,
-        default=50,
-        help='Top-k sampling (default: 50, 0 = disabled)'
+        "--top-k", type=int, default=50, help="Top-k sampling (default: 50, 0 = disabled)"
     )
     parser.add_argument(
-        '--top-p',
-        type=float,
-        default=0.95,
-        help='Nucleus sampling threshold (default: 0.95)'
+        "--top-p", type=float, default=0.95, help="Nucleus sampling threshold (default: 0.95)"
     )
     parser.add_argument(
-        '--repetition-penalty',
-        type=float,
-        default=1.2,
-        help='Repetition penalty (default: 1.2)'
+        "--repetition-penalty", type=float, default=1.2, help="Repetition penalty (default: 1.2)"
     )
     parser.add_argument(
-        '--no-sample',
-        action='store_true',
-        help='Use greedy decoding instead of sampling'
+        "--no-sample", action="store_true", help="Use greedy decoding instead of sampling"
     )
-    parser.add_argument(
-        '--stream',
-        action='store_true',
-        help='Stream output token by token'
-    )
+    parser.add_argument("--stream", action="store_true", help="Stream output token by token")
 
     # Other options
     parser.add_argument(
-        '--device',
-        type=str,
-        default=None,
-        help='Device to use: cuda, cpu (default: auto-detect)'
+        "--device", type=str, default=None, help="Device to use: cuda, cpu (default: auto-detect)"
     )
 
     args = parser.parse_args()
@@ -220,16 +179,16 @@ Requirements:
     info = loader.get_model_info()
 
     print()
-    CLIFormatter.metric("Model name:", info['architecture']['name'])
-    CLIFormatter.metric("Description:", info['architecture']['description'])
+    CLIFormatter.metric("Model name:", info["architecture"]["name"])
+    CLIFormatter.metric("Description:", info["architecture"]["description"])
     print()
 
     CLIFormatter.section("Architecture")
-    CLIFormatter.metric("Layers:", str(info['architecture']['num_layers']))
-    CLIFormatter.metric("Attention heads:", str(info['architecture']['num_heads']))
-    CLIFormatter.metric("Embedding dimension:", str(info['architecture']['d_model']))
-    CLIFormatter.metric("Feed-forward dimension:", str(info['architecture']['d_ff']))
-    CLIFormatter.metric("Max sequence length:", str(info['architecture']['max_seq_len']))
+    CLIFormatter.metric("Layers:", str(info["architecture"]["num_layers"]))
+    CLIFormatter.metric("Attention heads:", str(info["architecture"]["num_heads"]))
+    CLIFormatter.metric("Embedding dimension:", str(info["architecture"]["d_model"]))
+    CLIFormatter.metric("Feed-forward dimension:", str(info["architecture"]["d_ff"]))
+    CLIFormatter.metric("Max sequence length:", str(info["architecture"]["max_seq_len"]))
     CLIFormatter.metric("Vocabulary size:", f"{info['architecture']['vocab_size']:,}")
     print()
 
@@ -241,17 +200,17 @@ Requirements:
     print()
 
     CLIFormatter.section("Training Checkpoint")
-    CLIFormatter.metric("Epoch:", str(info['checkpoint']['epoch']))
+    CLIFormatter.metric("Epoch:", str(info["checkpoint"]["epoch"]))
 
     # Display validation loss
-    val_loss = info['checkpoint']['val_loss']
+    val_loss = info["checkpoint"]["val_loss"]
     if isinstance(val_loss, (int, float)):
         CLIFormatter.metric("Validation loss:", f"{val_loss:.6f}")
     else:
         CLIFormatter.metric("Validation loss:", str(val_loss))
 
     # Display perplexity with mathematical interpretation
-    val_ppl = info['checkpoint']['val_perplexity']
+    val_ppl = info["checkpoint"]["val_perplexity"]
     if isinstance(val_ppl, (int, float)):
         CLIFormatter.metric("Validation perplexity:", f"{val_ppl:.4f}")
         print()
@@ -270,7 +229,7 @@ Requirements:
         CLIFormatter.metric("Validation perplexity:", str(val_ppl))
 
     print()
-    CLIFormatter.metric("Device:", info['device'])
+    CLIFormatter.metric("Device:", info["device"])
     print()
 
     # Create generator
@@ -297,6 +256,7 @@ Requirements:
         print("-" * 70)
 
         if args.stream:
+
             def stream_cb(chunk):
                 sys.stdout.write(chunk)
                 sys.stdout.flush()
@@ -312,22 +272,22 @@ Requirements:
             repetition_penalty=args.repetition_penalty,
             do_sample=not args.no_sample,
             show_prompt=True,
-            stream_callback=stream_cb
+            stream_callback=stream_cb,
         )
 
         if args.stream:
             print("\n" + "-" * 70)
         else:
-            print(result['text'])
+            print(result["text"])
             print("-" * 70)
 
         # Display statistics
-        stats = result['statistics']
+        stats = result["statistics"]
         print()
         CLIFormatter.section("Generation Statistics")
-        CLIFormatter.metric("Prompt tokens:", str(stats['prompt_tokens']))
-        CLIFormatter.metric("Generated tokens:", str(stats['generated_tokens']))
-        CLIFormatter.metric("Total tokens:", str(stats['total_tokens']))
+        CLIFormatter.metric("Prompt tokens:", str(stats["prompt_tokens"]))
+        CLIFormatter.metric("Generated tokens:", str(stats["generated_tokens"]))
+        CLIFormatter.metric("Total tokens:", str(stats["total_tokens"]))
         CLIFormatter.metric("Time elapsed:", f"{stats['elapsed_time']:.3f}s")
         CLIFormatter.metric("Generation speed:", f"{stats['tokens_per_second']:.2f} tokens/sec")
 
@@ -335,17 +295,17 @@ Requirements:
         print()
         CLIFormatter.info("Formula: speed = tokens / time")
 
-        if stats['tokens_per_second'] > 100:
+        if stats["tokens_per_second"] > 100:
             CLIFormatter.success("Excellent generation speed (>100 tok/s)")
-        elif stats['tokens_per_second'] > 50:
+        elif stats["tokens_per_second"] > 50:
             CLIFormatter.info("Good generation speed (50-100 tok/s)")
-        elif stats['tokens_per_second'] > 20:
+        elif stats["tokens_per_second"] > 20:
             CLIFormatter.warning("Moderate generation speed (20-50 tok/s)")
         else:
             CLIFormatter.warning("Low generation speed (<20 tok/s)")
             CLIFormatter.info("Consider: GPU acceleration or model optimization")
 
-        if stats['stopped_early']:
+        if stats["stopped_early"]:
             print()
             CLIFormatter.info("Generation stopped at EOS token (before max_tokens)")
 
@@ -363,7 +323,7 @@ Requirements:
             CLIFormatter.error(f"Prompts file not found: {args.prompts_file}")
             return 1
 
-        with open(prompts_path, 'r', encoding='utf-8') as f:
+        with open(prompts_path, encoding="utf-8") as f:
             prompts = [line.strip() for line in f if line.strip()]
 
         CLIFormatter.info(f"Loaded {len(prompts)} prompts from {prompts_path.name}")
@@ -371,8 +331,10 @@ Requirements:
 
         # Progress callback
         def progress_callback(current, total, stats):
-            print(f"  [{current}/{total}] {stats['generated_tokens']} tokens in " +
-                  f"{stats['elapsed_time']:.2f}s ({stats['tokens_per_second']:.1f} tok/s)")
+            print(
+                f"  [{current}/{total}] {stats['generated_tokens']} tokens in "
+                + f"{stats['elapsed_time']:.2f}s ({stats['tokens_per_second']:.1f} tok/s)"
+            )
 
         results = generator.batch_generate(
             prompts=prompts,
@@ -382,12 +344,12 @@ Requirements:
             top_p=args.top_p,
             repetition_penalty=args.repetition_penalty,
             do_sample=not args.no_sample,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
         )
 
         # Calculate batch statistics
-        total_time = sum(r['statistics']['elapsed_time'] for r in results)
-        total_tokens = sum(r['statistics']['generated_tokens'] for r in results)
+        total_time = sum(r["statistics"]["elapsed_time"] for r in results)
+        total_tokens = sum(r["statistics"]["generated_tokens"] for r in results)
         avg_tokens_per_sec = total_tokens / total_time if total_time > 0 else 0
 
         print()
@@ -402,8 +364,8 @@ Requirements:
         if args.output:
             output_path = Path(args.output)
 
-            with open(output_path, 'w', encoding='utf-8') as f:
-                for prompt, result in zip(prompts, results):
+            with open(output_path, "w", encoding="utf-8") as f:
+                for prompt, result in zip(prompts, results, strict=False):
                     f.write(f"PROMPT: {prompt}\n")
                     f.write(f"GENERATED: {result['text']}\n")
                     f.write("-" * 70 + "\n\n")
@@ -413,10 +375,10 @@ Requirements:
         else:
             # Display results
             CLIFormatter.section("Generated Results")
-            for i, (prompt, result) in enumerate(zip(prompts, results)):
+            for i, (prompt, result) in enumerate(zip(prompts, results, strict=False)):
                 print(f"\n[{i + 1}] PROMPT:")
                 print(f"    {prompt}")
-                print(f"    GENERATED:")
+                print("    GENERATED:")
                 print(f"    {result['text']}")
 
         print()

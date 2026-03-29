@@ -2,12 +2,12 @@
 File extractors for different formats.
 """
 
-from .txt import TxtExtractor
-from .pdf import PdfExtractor
 from .epub import EpubExtractor
+from .pdf import PdfExtractor
+from .txt import TxtExtractor
 
 __all__ = [
-    'TxtExtractor',
-    'PdfExtractor',
-    'EpubExtractor',
+    "EpubExtractor",
+    "PdfExtractor",
+    "TxtExtractor",
 ]

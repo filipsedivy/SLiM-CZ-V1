@@ -4,26 +4,26 @@ BPE Tokenizer using SentencePiece.
 Implements Byte-Pair Encoding for Czech text with optimizations for morphology.
 """
 
-from pathlib import Path
-from typing import List, Optional, Dict, Any
 import warnings
+from pathlib import Path
+from typing import Any
 
 from ..preprocessing.base import (
+    print_info,
     print_section,
     print_success,
-    print_info,
-    print_warning,
-    print_error,
-    ProgressBar
 )
-from .statistics import StatisticsCollector, CorpusStatistics, TokenizerStatistics
+from .statistics import StatisticsCollector
 
 try:
     import sentencepiece as spm
+
     SENTENCEPIECE_AVAILABLE = True
 except ImportError:
     SENTENCEPIECE_AVAILABLE = False
-    warnings.warn("SentencePiece not installed. Install with: pip install sentencepiece")
+    warnings.warn(
+        "SentencePiece not installed. Install with: pip install sentencepiece", stacklevel=2
+    )
 
 
 class BPETokenizer:
@@ -48,7 +48,7 @@ class BPETokenizer:
     - High character coverage prevents unknown characters in Czech
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         """
         Initialize BPE tokenizer.
 
@@ -65,19 +65,19 @@ class BPETokenizer:
             )
 
         self.config = config
-        self.vocab_size = config.get('vocab_size', 16000)
-        self.character_coverage = config.get('character_coverage', 0.9999)
-        self.model_type = config.get('model_type', 'bpe')
+        self.vocab_size = config.get("vocab_size", 16000)
+        self.character_coverage = config.get("character_coverage", 0.9999)
+        self.model_type = config.get("model_type", "bpe")
 
-        self.sp_model: Optional[spm.SentencePieceProcessor] = None
-        self.model_prefix: Optional[str] = None
+        self.sp_model: spm.SentencePieceProcessor | None = None
+        self.model_prefix: str | None = None
 
     def train(
         self,
         input_path: Path,
         output_dir: Path,
-        model_prefix: str = 'tokenizer',
-        save_statistics: bool = True
+        model_prefix: str = "tokenizer",
+        save_statistics: bool = True,
     ):
         """
         Train BPE tokenizer on input files.
@@ -122,12 +122,12 @@ class BPETokenizer:
 
         elif input_path.is_dir():
             # Directory mode - find all .txt files
-            txt_files = sorted(input_path.rglob('*.txt'))
+            txt_files = sorted(input_path.rglob("*.txt"))
             if not txt_files:
                 raise ValueError(f"No .txt files found in {input_path}")
 
             # SentencePiece accepts comma-separated file paths
-            training_input = ','.join(str(f) for f in txt_files)
+            training_input = ",".join(str(f) for f in txt_files)
             print_info(f"Training on {len(txt_files)} text files from directory")
 
             # Show total size for large datasets
@@ -148,7 +148,15 @@ class BPETokenizer:
             character_coverage=self.character_coverage,
             model_type=self.model_type,
             # Czech-specific optimizations
-            user_defined_symbols=['<EMAIL>', '<PHONE>', '<URL>', '<IPADDR>', '<SSN>', '<DATE>', '<CREDITCARD>'],
+            user_defined_symbols=[
+                "<EMAIL>",
+                "<PHONE>",
+                "<URL>",
+                "<IPADDR>",
+                "<SSN>",
+                "<DATE>",
+                "<CREDITCARD>",
+            ],
             unk_id=0,  # Unknown token
             bos_id=1,  # Beginning of sequence
             eos_id=2,  # End of sequence
@@ -178,14 +186,11 @@ class BPETokenizer:
                 "Dobrý den, jak se máte?",
                 "Kontaktujte mě na email@example.com nebo telefonně.",
                 "Vědecká analýza lingvistických vzorců.",
-                "Morfologicky bohatý jazyk vyžaduje specifický přístup."
+                "Morfologicky bohatý jazyk vyžaduje specifický přístup.",
             ]
 
             tokenizer_stats = stats_collector.analyze_tokenizer(
-                self.sp_model,
-                self.config,
-                corpus_stats,
-                sample_texts=sample_texts
+                self.sp_model, self.config, corpus_stats, sample_texts=sample_texts
             )
 
             # Print tokenizer statistics
@@ -193,7 +198,7 @@ class BPETokenizer:
             stats_collector.print_statistics(corpus_stats, tokenizer_stats)
 
             # Save combined statistics to JSON
-            stats_path = output_dir / f'{model_prefix}.statistics.json'
+            stats_path = output_dir / f"{model_prefix}.statistics.json"
             stats_collector.save_statistics(corpus_stats, tokenizer_stats, stats_path)
             print()
 
@@ -207,8 +212,8 @@ class BPETokenizer:
 
         print_section("Tokenizer Statistics")
         print_info(f"Vocabulary size: {self.sp_model.vocab_size():,} tokens")
-        print_info(f"Special tokens: <unk>, <s>, </s>, <pad>")
-        print_info(f"User-defined tokens: <EMAIL>, <PHONE>, <URL>, etc.")
+        print_info("Special tokens: <unk>, <s>, </s>, <pad>")
+        print_info("User-defined tokens: <EMAIL>, <PHONE>, <URL>, etc.")
 
         # Show sample tokenization
         sample_texts = [
@@ -240,7 +245,7 @@ class BPETokenizer:
         print_success(f"Loaded tokenizer from {model_path}")
         print_info(f"Vocabulary size: {self.sp_model.vocab_size():,} tokens")
 
-    def encode(self, text: str) -> List[int]:
+    def encode(self, text: str) -> list[int]:
         """
         Encode text to token IDs.
 
@@ -255,7 +260,7 @@ class BPETokenizer:
 
         return self.sp_model.encode_as_ids(text)
 
-    def encode_as_pieces(self, text: str) -> List[str]:
+    def encode_as_pieces(self, text: str) -> list[str]:
         """
         Encode text to token pieces (subwords).
 
@@ -270,7 +275,7 @@ class BPETokenizer:
 
         return self.sp_model.encode_as_pieces(text)
 
-    def decode(self, ids: List[int]) -> str:
+    def decode(self, ids: list[int]) -> str:
         """
         Decode token IDs to text.
 
@@ -292,7 +297,7 @@ class BPETokenizer:
 
         return self.sp_model.vocab_size()
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         """
         Get vocabulary mapping.
 
@@ -320,7 +325,7 @@ class BPETokenizer:
 
         vocab = self.get_vocab()
 
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(vocab, f, indent=2, ensure_ascii=False)
 
         print_success(f"Vocabulary saved: {output_path}")

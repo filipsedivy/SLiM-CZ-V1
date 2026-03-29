@@ -9,22 +9,22 @@ import argparse
 import sys
 from pathlib import Path
 
-from ..tokenization import BPETokenizer, VocabularyManager
 from ..preprocessing.base import (
     print_error,
-    print_success,
-    print_section,
+    print_header,
     print_info,
+    print_section,
+    print_success,
     print_warning,
-    print_header
 )
+from ..tokenization import BPETokenizer, VocabularyManager
 
 
 def main():
     """Main entry point for tokenizer training CLI."""
 
     parser = argparse.ArgumentParser(
-        description='SLiM-CZ-V1 BPE Tokenizer Training',
+        description="SLiM-CZ-V1 BPE Tokenizer Training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -44,71 +44,61 @@ Research Notes:
   - Character coverage 0.9999 handles Czech diacritics
   - BPE better for morphologically rich languages like Czech
   - Directory mode streams files without loading into memory
-        """
+        """,
     )
 
     # Required arguments
     parser.add_argument(
-        '--input', '-i',
+        "--input",
+        "-i",
         type=str,
         required=True,
-        help='Input: text file OR directory with .txt files (for TB-scale datasets)'
+        help="Input: text file OR directory with .txt files (for TB-scale datasets)",
     )
 
     parser.add_argument(
-        '--output', '-o',
-        type=str,
-        required=True,
-        help='Output directory for tokenizer model'
+        "--output", "-o", type=str, required=True, help="Output directory for tokenizer model"
     )
 
     # Tokenizer parameters
     parser.add_argument(
-        '--vocab-size',
+        "--vocab-size",
         type=int,
         default=16000,
-        help='Vocabulary size (default: 16000, recommended: 16000-24000)'
+        help="Vocabulary size (default: 16000, recommended: 16000-24000)",
     )
 
     parser.add_argument(
-        '--character-coverage',
+        "--character-coverage",
         type=float,
         default=0.9999,
-        help='Character coverage for handling rare characters (default: 0.9999)'
+        help="Character coverage for handling rare characters (default: 0.9999)",
     )
 
     parser.add_argument(
-        '--model-type',
+        "--model-type",
         type=str,
-        default='bpe',
-        choices=['bpe', 'unigram', 'char', 'word'],
-        help='Tokenizer model type (default: bpe)'
+        default="bpe",
+        choices=["bpe", "unigram", "char", "word"],
+        help="Tokenizer model type (default: bpe)",
     )
 
     parser.add_argument(
-        '--model-prefix',
+        "--model-prefix",
         type=str,
-        default='tokenizer',
-        help='Prefix for model files (default: tokenizer)'
+        default="tokenizer",
+        help="Prefix for model files (default: tokenizer)",
     )
 
     # Analysis options
-    parser.add_argument(
-        '--show-samples',
-        action='store_true',
-        help='Show sample tokenizations'
-    )
+    parser.add_argument("--show-samples", action="store_true", help="Show sample tokenizations")
+
+    parser.add_argument("--show-vocab", action="store_true", help="Show vocabulary statistics")
 
     parser.add_argument(
-        '--show-vocab',
-        action='store_true',
-        help='Show vocabulary statistics'
-    )
-
-    parser.add_argument(
-        '--no-statistics',
-        action='store_true',
-        help='Disable detailed statistical analysis (saves time on large corpora)'
+        "--no-statistics",
+        action="store_true",
+        help="Disable detailed statistical analysis (saves time on large corpora)",
     )
 
     args = parser.parse_args()
@@ -130,7 +120,7 @@ Research Notes:
         # Basic file validation
         file_size = input_path.stat().st_size
         print_success(f"Input file: {input_path.name}")
-        print_info(f"File size: {file_size / (1024 ** 2):.2f} MB")
+        print_info(f"File size: {file_size / (1024**2):.2f} MB")
 
         # Validate minimum size (10KB as a basic check)
         if file_size < 10000:
@@ -142,7 +132,7 @@ Research Notes:
         # Directory mode (scalable for TB datasets)
         print_section("Input Validation (Directory Mode)")
 
-        txt_files = list(input_path.rglob('*.txt'))
+        txt_files = list(input_path.rglob("*.txt"))
         if not txt_files:
             print_error(f"No .txt files found in {args.input}")
             return 1
@@ -151,9 +141,9 @@ Research Notes:
 
         # Calculate total size
         total_size = sum(f.stat().st_size for f in txt_files)
-        print_info(f"Total size: {total_size / (1024 ** 3):.2f} GB")
+        print_info(f"Total size: {total_size / (1024**3):.2f} GB")
 
-        if total_size > 100 * 1024 ** 3:  # > 100GB
+        if total_size > 100 * 1024**3:  # > 100GB
             print_warning("Large dataset detected (>100GB)")
             print_info("Training may take significant time")
             print_info("SentencePiece will stream files (no memory issues)")
@@ -164,9 +154,9 @@ Research Notes:
 
     # Create configuration
     config = {
-        'vocab_size': args.vocab_size,
-        'character_coverage': args.character_coverage,
-        'model_type': args.model_type,
+        "vocab_size": args.vocab_size,
+        "character_coverage": args.character_coverage,
+        "model_type": args.model_type,
     }
 
     # Display configuration
@@ -192,12 +182,12 @@ Research Notes:
             input_path=input_path,
             output_dir=output_dir,
             model_prefix=args.model_prefix,
-            save_statistics=not args.no_statistics
+            save_statistics=not args.no_statistics,
         )
 
         # Show vocabulary statistics
         if args.show_vocab:
-            vocab_path = output_dir / f'{args.model_prefix}.vocab'
+            vocab_path = output_dir / f"{args.model_prefix}.vocab"
             if vocab_path.exists():
                 vocab_manager = VocabularyManager(vocab_path)
                 vocab_manager.print_statistics()
@@ -219,10 +209,10 @@ Research Notes:
 
         if not args.no_statistics:
             print("\n   Statistical Analysis:")
-            print(f"      - Corpus metrics (TTR, entropy, coverage)")
-            print(f"      - Tokenizer performance (compression, fertility)")
-            print(f"      - Czech-specific metrics (diacritic preservation)")
-            print(f"      - All metrics are mathematically defined and reproducible")
+            print("      - Corpus metrics (TTR, entropy, coverage)")
+            print("      - Tokenizer performance (compression, fertility)")
+            print("      - Czech-specific metrics (diacritic preservation)")
+            print("      - All metrics are mathematically defined and reproducible")
 
         print("=" * 70)
 
@@ -231,6 +221,7 @@ Research Notes:
     except Exception as e:
         print_error(f"Tokenizer training failed: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

@@ -2,14 +2,11 @@
 Command-line interface tools for SLiM-CZ-V1.
 """
 
-from . import extract_text
-from . import train_tokenizer
-from . import tokenize_parallel
-from . import inference
+from . import extract_text, inference, tokenize_parallel, train_tokenizer
 
 __all__ = [
-    'extract_text',
-    'train_tokenizer',
-    'tokenize_parallel',
-    'inference',
+    "extract_text",
+    "inference",
+    "tokenize_parallel",
+    "train_tokenizer",
 ]
